@@ -6,7 +6,7 @@ import json
 import time
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                               QToolBar, QFileDialog, QMessageBox, QDockWidget, QFrame)
-from PySide6.QtCore import Qt, Slot, QSettings
+from PySide6.QtCore import Qt, Slot, QSettings, QEvent
 from PySide6.QtGui import QAction, QKeySequence
 
 from ui.video_player import VideoPlayer
@@ -64,6 +64,12 @@ class MainWindow(QMainWindow):
         self.label_panel.label_deleted.connect(self.timeline.remove_label)
         self.label_panel.label_selected.connect(self.timeline.select_label)
         
+        # Connect label playback request to player
+        self.timeline.label_playback_requested.connect(self.play_label_segment)
+        
+        # Connect signals for timeline-label panel synchronization
+        self.timeline.label_created.connect(self.on_label_created)
+        
         # Create toolbar and actions
         self.create_actions()
         self.create_toolbar()
@@ -72,6 +78,18 @@ class MainWindow(QMainWindow):
         self.current_video_path = None
         self.current_project_path = None
         self.labels = []
+        
+        # Setup the status bar
+        self.statusBar().showMessage("Ready")
+        
+        # Override the timeline's keyPressEvent with our custom handler
+        self.timeline.keyPressEvent = lambda event: self.handle_timeline_key_press(event)
+        
+        # Initialize UI mode based on the default timeline mode
+        self.update_mode(self.timeline.current_mode)
+        
+        # Install event filter to catch space bar press from anywhere
+        self.installEventFilter(self)
     
     def create_actions(self):
         """Create application actions."""
@@ -99,6 +117,29 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.open_video_action)
         toolbar.addAction(self.save_project_action)
         toolbar.addAction(self.export_labels_action)
+    
+    def update_mode(self, mode):
+        """Update the UI based on the current mode."""
+        if mode == self.timeline.CHOOSE_MODE:  # View mode
+            # Disable label editing
+            self.label_panel.add_label_button.setEnabled(False)
+            self.statusBar().showMessage("View Mode: Navigate and play labeled segments", 2000)
+        else:  # Edit mode
+            # Enable label editing
+            self.label_panel.add_label_button.setEnabled(True)
+            self.statusBar().showMessage("Edit Mode: Create and modify labels", 2000)
+
+    def handle_timeline_key_press(self, event):
+        """Handle timeline widget key presses."""
+        # Store the original keyPressEvent 
+        original_key_press = type(self.timeline).keyPressEvent
+        
+        # Call the original implementation
+        original_key_press(self.timeline, event)
+        
+        # Then handle mode-specific updates
+        if event.key() == Qt.Key_C or event.key() == Qt.Key_X:
+            self.update_mode(self.timeline.current_mode)
     
     @Slot()
     def open_video(self):
@@ -237,4 +278,27 @@ class MainWindow(QMainWindow):
                     writer.writerow(label)
             QMessageBox.information(self, "Success", "Labels exported successfully to CSV.")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to export labels to CSV: {str(e)}") 
+            QMessageBox.critical(self, "Error", f"Failed to export labels to CSV: {str(e)}")
+
+    def play_label_segment(self, start_frame, end_frame):
+        """Play a specific video segment from start to end frame."""
+        # Set playback range
+        self.video_player.set_playback_range(start_frame, end_frame)
+        
+        # Start playback
+        self.video_player.play()
+
+    def on_label_created(self, label_data):
+        """Handle a label created in the timeline."""
+        self.label_panel.add_label_to_list(label_data)
+
+    def eventFilter(self, obj, event):
+        """Global event filter to catch space bar press."""
+        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Space:
+            # Toggle video playback
+            if self.video_player.is_playing():
+                self.video_player.pause()
+            else:
+                self.video_player.play()
+            return True
+        return super().eventFilter(obj, event) 

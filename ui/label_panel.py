@@ -68,8 +68,9 @@ class LabelPanel(QWidget):
         # Label categories
         self.categories = ["default", "action", "object", "person"]
         
-        # Currently editing label
+        # Initialize label properties
         self.current_label_id = None
+        self.label_index = "1"  # Default label index
         
         # Set up UI
         self.setup_ui()
@@ -224,10 +225,16 @@ class LabelPanel(QWidget):
         if not self.current_label_id:
             return
             
+        # Get the action name from the text field
+        action_name = self.name_edit.text().strip()
+        
+        # Format the full name with index prefix
+        full_name = f"{self.label_index}. {action_name}" if action_name else f"{self.label_index}."
+        
         # Create updated label data
         label_data = {
             "id": self.current_label_id,
-            "name": self.name_edit.text(),
+            "name": full_name,
             "color": [
                 self.color_button.color().red(),
                 self.color_button.color().green(),
@@ -241,7 +248,7 @@ class LabelPanel(QWidget):
         for i in range(self.label_list.count()):
             item = self.label_list.item(i)
             if item.data(Qt.UserRole) == self.current_label_id:
-                item.setText(f"{label_data['name']}")
+                item.setText(full_name)
                 
                 # Set color of item
                 pixmap = QPixmap(16, 16)
@@ -281,20 +288,20 @@ class LabelPanel(QWidget):
     
     def add_label_to_list(self, label_data):
         """Add a label to the list widget."""
-        label_id = label_data["id"]
-        label_name = label_data.get("name", "Unnamed")
+        label_id = label_data.get("id", "")
+        name = label_data.get("name", "")
+        color = label_data.get("color", [255, 165, 0, 180])  # Default to orange
         
         # Create list item
-        item = QListWidgetItem(f"{label_name}")
+        item = QListWidgetItem(name)
         item.setData(Qt.UserRole, label_id)
         
-        # Create color icon
-        color = QColor(*label_data.get("color", [255, 165, 0, 180]))
+        # Set icon with label color
         pixmap = QPixmap(16, 16)
         pixmap.fill(Qt.transparent)
         
         painter = QPainter(pixmap)
-        painter.setBrush(QBrush(color))
+        painter.setBrush(QBrush(QColor(*color)))
         painter.setPen(Qt.black)
         painter.drawRect(0, 0, 15, 15)
         painter.end()
@@ -303,14 +310,43 @@ class LabelPanel(QWidget):
         
         # Add to list
         self.label_list.addItem(item)
+        
+        # Select new item if it's the only one
+        if self.label_list.count() == 1:
+            self.label_list.setCurrentItem(item)
     
     def update_label_data(self, label_data):
         """Update the editor with label data."""
         self.current_label_id = label_data["id"]
         
-        # Update form fields
-        self.name_edit.setText(label_data.get("name", ""))
-            
+        # Parse label name - maintain the index format "1. Action"
+        name = label_data.get("name", "")
+        # Split at the first period to separate the index from the action
+        parts = name.split(".", 1)
+        
+        if len(parts) > 1 and parts[0].strip().isdigit():
+            # Already has format "1. Action"
+            self.name_edit.setText(parts[1].strip())
+            self.label_index = parts[0].strip()
+        else:
+            # No proper format yet, use the full name
+            self.name_edit.setText(name)
+            # Try to extract index from the front if it's a digit
+            if name and name[0].isdigit():
+                index_end = 0
+                while index_end < len(name) and name[index_end].isdigit():
+                    index_end += 1
+                self.label_index = name[:index_end]
+            else:
+                # No index found, use the list position
+                for i in range(self.label_list.count()):
+                    if self.label_list.item(i).data(Qt.UserRole) == self.current_label_id:
+                        self.label_index = str(i + 1)
+                        break
+                else:
+                    # Fallback if no match found
+                    self.label_index = "1"
+        
         color_rgba = label_data.get("color", [255, 165, 0, 180])
         self.color_button.setColor(QColor(*color_rgba))
         

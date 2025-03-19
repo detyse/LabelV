@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                               QSlider, QLabel, QSizePolicy)
 from PySide6.QtCore import (Qt, Signal, Slot, QThread, QMutex, QMutexLocker, 
                            QSize, QTimer, QThreadPool, QRunnable)
+from PySide6.QtWidgets import QStyle
 from PySide6.QtGui import QImage, QPixmap, QIcon
 
 class FrameLoader(QRunnable):
@@ -89,6 +90,7 @@ class VideoPlayer(QWidget):
         self.duration_sec = 0
         self.current_frame = 0
         self.playing = False
+        self.is_playing_flag = False
         
         # Frame cache
         self.frame_cache = FrameCache(max_size=30)
@@ -245,12 +247,14 @@ class VideoPlayer(QWidget):
             self.playing = False
             self.play_timer.stop()
             self.play_button.setText("Play")
+            self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         else:
             self.playing = True
             # Calculate interval based on FPS
             interval = int(1000 / self.fps) if self.fps > 0 else 33  # Default to ~30fps
             self.play_timer.start(interval)
             self.play_button.setText("Pause")
+            self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
     
     @Slot()
     def next_frame(self):
@@ -301,4 +305,43 @@ class VideoPlayer(QWidget):
         """Handle close event."""
         if self.cap:
             self.cap.release()
-        event.accept() 
+        event.accept()
+
+    def play(self):
+        """Start video playback."""
+        if not self.cap.isOpened():
+            return
+        
+        self.is_playing_flag = True
+        self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+        
+        # Start playback timer if not running
+        if not self.play_timer.isActive():
+            self.play_timer.start(int(1000 / self.fps))
+
+    def pause(self):
+        """Pause video playback."""
+        self.is_playing_flag = False
+        self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        
+        # Stop timer
+        if self.play_timer.isActive():
+            self.play_timer.stop()
+
+    def is_playing(self):
+        """Return whether video is currently playing."""
+        return self.is_playing_flag
+
+    def set_playback_range(self, start_frame, end_frame):
+        """Set a range of frames to play."""
+        self.playback_start_frame = start_frame
+        self.playback_end_frame = end_frame
+        self.current_frame = start_frame
+        
+        # Update UI
+        self.seek_slider.setValue(start_frame)
+        self.update_time_label()
+        self.load_frame(start_frame)
+        
+        # Signal
+        self.position_changed.emit(start_frame) 

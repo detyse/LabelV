@@ -8,6 +8,7 @@ A video labeling tool built with PySide6 that allows you to mark and annotate pe
 - Frame-by-frame navigation and playback
 - Timeline visualization with zooming support
 - Create, edit, and delete labels for time periods in videos
+- Support for overlapping labels with multi-track display
 - Customize label colors
 - Export labels to JSON format
 
@@ -46,31 +47,30 @@ A video labeling tool built with PySide6 that allows you to mark and annotate pe
    - Timeline: Click to jump to a position
 
 4. Two operating modes are available (toggle with keyboard shortcuts):
-   - Choose/Scroll Mode (C): For navigating without affecting labels
+   - View Mode (C): For navigating and playing labeled segments
+     - Clicking on a label plays that segment
+     - Creating/editing labels is disabled
    - Edit Mode (X): For creating and adjusting labels
+     - Create labels by clicking and dragging on the timeline
+     - Adjust label boundaries by dragging the handles at the start or end
+     - Move labels by dragging the middle section
 
-5. Creating and editing labels:
-   - Switch to Edit Mode (press X)
-   - Create labels by clicking and dragging on the timeline
-   - Adjust label boundaries by dragging the handles at the start or end
-   - Move labels by dragging the middle section
-   - Labels are automatically numbered sequentially
+5. Label format and management:
+   - Labels are formatted as "1. action_name" for clarity
+   - Labels are automatically assigned to separate tracks when they overlap
+   - Edit label properties in the Labels panel
+   - Delete labels by selecting them and pressing Delete
 
-6. Edit label properties in the Labels panel:
-   - Name: Customize the label name
-   - Color: Customize the label color
-   - Description: Add detailed notes about the label
+6. Save your project using the "Save Project" button to preserve your work.
 
-7. Save your project using the "Save Project" button to preserve your work.
-
-8. Export labels to JSON format using the "Export Labels" button for use in other applications.
+7. Export labels to JSON format using the "Export Labels" button for use in other applications.
 
 ## Keyboard Shortcuts
 
 - Left/Right arrow keys: Move one frame backward/forward
 - Delete key: Delete the selected label
 - X: Switch to Edit Mode (for creating and adjusting labels)
-- C: Switch to Choose/Scroll Mode (for navigation without affecting labels)
+- C: Switch to View Mode (for navigation and playing labeled segments)
 
 ## License
 
