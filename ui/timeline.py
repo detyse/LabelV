@@ -3,10 +3,11 @@
 
 import uuid
 import math
+import numpy as np
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from PySide6.QtCore import Qt, Signal, Slot, QRectF, QPointF
 from PySide6.QtGui import (QPainter, QBrush, QPen, QColor, QPainterPath, 
-                          QLinearGradient, QFont, QFontMetrics)
+                          QLinearGradient, QFont, QFontMetrics, QRadialGradient)
 
 class Label:
     """Represents a video label with start and end frames."""
@@ -190,37 +191,30 @@ class TimelineWidget(QWidget):
         width = self.width()
         height = self.height()
         
-        # Draw timeline track background
+        # Draw timeline track background with gradient for better visual appeal
         timeline_rect = QRectF(0, 0, width, self.timeline_height)
-        painter.fillRect(timeline_rect, QColor(60, 60, 60))
+        gradient = QLinearGradient(0, 0, 0, self.timeline_height)
+        gradient.setColorAt(0, QColor(70, 70, 70))
+        gradient.setColorAt(1, QColor(50, 50, 50))
+        painter.fillRect(timeline_rect, gradient)
         
-        # Draw time markers
+        # Draw timeline ruler with grid lines
         self.draw_time_markers(painter, timeline_rect)
         
         # Draw label tracks
         label_area_rect = QRectF(0, self.timeline_height, width, height - self.timeline_height)
-        painter.fillRect(label_area_rect, QColor(50, 50, 50))
+        painter.fillRect(label_area_rect, QColor(45, 45, 45))
+        
+        # Draw thin separator line between timeline and label area
+        painter.setPen(QPen(QColor(100, 100, 100), 1))
+        painter.drawLine(0, self.timeline_height, width, self.timeline_height)
         
         # Draw labels
         self.draw_labels(painter, label_area_rect)
         
-        # Draw current position marker
+        # Draw current position marker with enhanced style
         position_x = self.get_position_for_frame(self.current_frame)
-        
-        # Position line
-        position_pen = QPen(QColor(255, 0, 0), 2)
-        painter.setPen(position_pen)
-        painter.drawLine(QPointF(position_x, 0), QPointF(position_x, height))
-        
-        # Position marker (triangle)
-        marker_path = QPainterPath()
-        marker_size = 10
-        marker_path.moveTo(position_x, 0)
-        marker_path.lineTo(position_x - marker_size/2, marker_size)
-        marker_path.lineTo(position_x + marker_size/2, marker_size)
-        marker_path.closeSubpath()
-        
-        painter.fillPath(marker_path, QColor(255, 0, 0))
+        self.draw_timeline_scrubber(painter, position_x, height)
     
     def draw_time_markers(self, painter, rect):
         """Draw time markers on the timeline."""
@@ -235,7 +229,9 @@ class TimelineWidget(QWidget):
         
         # Calculate appropriate interval (aim for markers roughly every 100 pixels)
         intervals = [1, 5, 10, 30, 60, 300, 600, 1800, 3600, 7200, 18000, 36000]
-        fps = 30  # Assume standard fps if not available
+        
+        # Use the instance FPS instead of hardcoded value
+        fps = self.fps
         
         # Convert frames to seconds for marker intervals
         seconds_per_pixel = frame_per_pixel / fps
@@ -246,7 +242,23 @@ class TimelineWidget(QWidget):
                 interval_seconds = interval
                 break
         
-        # Draw markers
+        # Draw background grid lines (minor ticks)
+        painter.setPen(QPen(QColor(70, 70, 70), 1, Qt.DotLine))
+        minor_interval = interval_seconds / 5  # Smaller ticks in between major ones
+        
+        start_second_minor = math.floor(self.offset / fps / minor_interval) * minor_interval
+        end_second_minor = math.ceil((self.offset + visible_frames) / fps / minor_interval) * minor_interval
+        
+        for second in np.arange(start_second_minor, end_second_minor + minor_interval, minor_interval):
+            frame = int(second * fps)
+            x_pos = self.get_position_for_frame(frame)
+            
+            if 0 <= x_pos <= width:
+                # Draw minor tick line (shorter)
+                painter.drawLine(QPointF(x_pos, rect.bottom() - self.time_marker_height / 3), 
+                                QPointF(x_pos, rect.bottom()))
+        
+        # Draw main markers
         painter.setPen(QColor(180, 180, 180))
         font = QFont()
         font.setPointSize(8)
@@ -256,14 +268,17 @@ class TimelineWidget(QWidget):
         start_second = math.floor(self.offset / fps / interval_seconds) * interval_seconds
         end_second = math.ceil((self.offset + visible_frames) / fps / interval_seconds) * interval_seconds
         
-        for second in range(int(start_second), int(end_second) + interval_seconds, interval_seconds):
+        for second in np.arange(start_second, end_second + interval_seconds, interval_seconds):
             frame = int(second * fps)
             x_pos = self.get_position_for_frame(frame)
             
             if 0 <= x_pos <= width:
                 # Draw marker line
-                painter.drawLine(QPointF(x_pos, rect.bottom() - self.time_marker_height), 
+                painter.setPen(QPen(QColor(120, 120, 120), 1))
+                painter.drawLine(QPointF(x_pos, rect.top()), 
                                 QPointF(x_pos, rect.bottom()))
+                
+                painter.setPen(QColor(200, 200, 200))
                 
                 # Format time
                 minutes, seconds = divmod(second, 60)
@@ -275,8 +290,19 @@ class TimelineWidget(QWidget):
                     time_text = f"{minutes:02d}:{seconds:02d}"
                 
                 # Draw time text
-                text_rect = QRectF(x_pos - 50, rect.bottom() - self.time_marker_height - 15, 100, 15)
-                painter.drawText(text_rect, Qt.AlignCenter, time_text)
+                time_rect = QRectF(x_pos - 50, rect.bottom() - self.time_marker_height - 15, 100, 15)
+                painter.drawText(time_rect, Qt.AlignCenter, time_text)
+                
+                # Draw frame number below (smaller)
+                small_font = QFont()
+                small_font.setPointSize(7)
+                painter.setFont(small_font)
+                
+                frame_rect = QRectF(x_pos - 50, rect.bottom() - 12, 100, 12)
+                painter.setPen(QColor(150, 150, 150))
+                painter.drawText(frame_rect, Qt.AlignCenter, f"Frame: {frame}")
+                
+                painter.setFont(font)  # Restore original font
     
     def draw_labels(self, painter, rect):
         """Draw label tracks and labels."""
@@ -332,7 +358,7 @@ class TimelineWidget(QWidget):
         label_rect = QRectF(
             start_x,
             track_rect.top() + margin,
-            max(1, end_x - start_x),  # Ensure minimum width of 1
+            max(2, end_x - start_x),  # Ensure minimum width of 2 pixels
             track_rect.height() - 2 * margin
         )
         
@@ -347,7 +373,7 @@ class TimelineWidget(QWidget):
             # Make selected labels brighter
             base_color = base_color.lighter(130)
             
-        darker_color = base_color.darker(120)
+        darker_color = base_color.darker(130)
         gradient.setColorAt(0, base_color)
         gradient.setColorAt(1, darker_color)
         
@@ -356,13 +382,18 @@ class TimelineWidget(QWidget):
         
         # Draw border
         if label.selected:
+            # Add glow effect for selected labels
+            glow_pen = QPen(QColor(255, 255, 255, 100), 3)
+            painter.setPen(glow_pen)
+            painter.drawRoundedRect(label_rect.adjusted(-1, -1, 1, 1), 4, 4)
+            
             painter.setPen(QPen(QColor(255, 255, 255), 2))
         elif self.hover_label_idx >= 0 and self.labels[self.hover_label_idx].id == label.id:
             painter.setPen(QPen(QColor(220, 220, 220), 1))
         else:
             painter.setPen(QPen(darker_color, 1))
             
-        painter.drawRoundedRect(label_rect, 3, 3)
+        painter.drawRoundedRect(label_rect, 4, 4)
         
         # Draw label text if there's enough space
         if label_rect.width() > 30:
@@ -370,14 +401,34 @@ class TimelineWidget(QWidget):
             font.setPointSize(8)
             painter.setFont(font)
             
+            # Format timestamps for start and end frames
+            start_time_sec = label.start_frame / self.fps if self.fps > 0 else 0
+            end_time_sec = label.end_frame / self.fps if self.fps > 0 else 0
+            
+            # Format time as MM:SS or HH:MM:SS depending on length
+            start_time = self.format_time_compact(start_time_sec)
+            end_time = self.format_time_compact(end_time_sec)
+            
+            # Create label text with timestamps
+            if label_rect.width() > 150:
+                # Full format with timestamps if there's enough space
+                display_text = f"{label.name} [{start_time}-{end_time}]"
+            elif label_rect.width() > 80:
+                # Shorter label name with timestamps
+                name = label.name[:8] + "..." if len(label.name) > 10 else label.name
+                display_text = f"{name} [{start_time}]"
+            else:
+                # Just the label name if space is limited
+                display_text = label.name
+            
             # Calculate text bounding rect
             font_metrics = QFontMetrics(font)
-            text_width = font_metrics.horizontalAdvance(label.name)
+            text_width = font_metrics.horizontalAdvance(display_text)
             
             if text_width + 10 <= label_rect.width():
                 text_rect = label_rect.adjusted(5, 0, -5, 0)
                 painter.setPen(QColor(0, 0, 0))
-                painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, label.name)
+                painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, display_text)
     
     @Slot(int)
     def update_position(self, position):
@@ -531,6 +582,22 @@ class TimelineWidget(QWidget):
             if label_idx != self.hover_label_idx:
                 self.hover_label_idx = label_idx
                 self.update()
+                
+                # Change cursor based on what we're hovering over
+                if label_idx >= 0:
+                    start_x = self.get_position_for_frame(self.labels[label_idx].start_frame)
+                    end_x = self.get_position_for_frame(self.labels[label_idx].end_frame)
+                    
+                    # Change cursor based on position
+                    if abs(event.position().x() - start_x) <= self.resize_handle_width:
+                        self.setCursor(Qt.SizeHorCursor)  # Left resize
+                    elif abs(event.position().x() - end_x) <= self.resize_handle_width:
+                        self.setCursor(Qt.SizeHorCursor)  # Right resize
+                    else:
+                        self.setCursor(Qt.SizeAllCursor)  # Move
+                else:
+                    self.setCursor(Qt.ArrowCursor)  # Default cursor
+                
             return
             
         # Calculate frame at current position
@@ -688,4 +755,49 @@ class TimelineWidget(QWidget):
         """Set the FPS value for the timeline."""
         if fps > 0:
             self.fps = fps
-            self.update() 
+            self.update()
+    
+    def format_time_compact(self, seconds):
+        """Format seconds to MM:SS or HH:MM:SS format depending on duration."""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        else:
+            return f"{minutes:02d}:{secs:02d}"
+    
+    def draw_timeline_scrubber(self, painter, position_x, height):
+        """Draw a more intuitive timeline scrubber handle."""
+        # Draw the vertical line
+        position_pen = QPen(QColor(255, 0, 0), 2)
+        painter.setPen(position_pen)
+        painter.drawLine(QPointF(position_x, 0), QPointF(position_x, height))
+        
+        # Draw scrubber handle (circle at top)
+        handle_radius = 6
+        handle_rect = QRectF(
+            position_x - handle_radius,
+            0, 
+            handle_radius * 2,
+            handle_radius * 2
+        )
+        
+        # Draw glow effect
+        gradient = QRadialGradient(
+            position_x,
+            handle_radius,
+            handle_radius * 2
+        )
+        gradient.setColorAt(0, QColor(255, 80, 80, 180))
+        gradient.setColorAt(1, QColor(255, 0, 0, 0))
+        
+        painter.setBrush(QBrush(gradient))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(handle_rect.adjusted(-handle_radius, -handle_radius/2, handle_radius, handle_radius/2))
+        
+        # Draw handle
+        painter.setBrush(QColor(255, 0, 0))
+        painter.setPen(QPen(QColor(200, 200, 200), 1))
+        painter.drawEllipse(handle_rect) 

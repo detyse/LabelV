@@ -181,6 +181,12 @@ class VideoPlayer(QWidget):
             self.duration_changed.emit(self.frame_count)
             self.position_changed.emit(0)
             
+            # Share fps with timeline directly through parent window
+            parent = self.parent()
+            if parent and hasattr(parent, 'timeline'):
+                parent.timeline.set_fps(self.fps)
+                print(f"Set timeline FPS to {self.fps}")
+            
             return True
             
         except Exception as e:

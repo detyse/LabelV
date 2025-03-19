@@ -330,9 +330,29 @@ class LabelPanel(QWidget):
         
         self.description_edit.setPlainText(label_data.get("description", ""))
         
-        # Update frame range display
-        self.start_frame_label.setText(str(label_data.get("start_frame", 0)))
-        self.end_frame_label.setText(str(label_data.get("end_frame", 0)))
+        # Update frame range display with frames and timestamps
+        start_frame = label_data.get("start_frame", 0)
+        end_frame = label_data.get("end_frame", 0)
+        
+        # Get parent window to access FPS
+        fps = 30.0  # Default
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'video_player') and hasattr(parent.video_player, 'fps'):
+                fps = parent.video_player.fps
+                break
+            parent = parent.parent()
+        
+        # Calculate timestamps
+        start_time_sec = start_frame / fps if fps > 0 else 0
+        end_time_sec = end_frame / fps if fps > 0 else 0
+        
+        # Format time as HH:MM:SS
+        start_time = self.format_time(start_time_sec)
+        end_time = self.format_time(end_time_sec)
+        
+        self.start_frame_label.setText(f"{start_frame} ({start_time})")
+        self.end_frame_label.setText(f"{end_frame} ({end_time})")
         
         # Enable editor
         self.set_editor_enabled(True)
@@ -342,4 +362,11 @@ class LabelPanel(QWidget):
         """Update the displayed frame range for a label."""
         if label_id == self.current_label_id:
             self.start_frame_label.setText(str(start_frame))
-            self.end_frame_label.setText(str(end_frame)) 
+            self.end_frame_label.setText(str(end_frame))
+
+    def format_time(self, seconds):
+        """Format seconds to HH:MM:SS."""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}" 

@@ -5,7 +5,7 @@ import os
 import json
 import time
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                              QToolBar, QFileDialog, QMessageBox, QDockWidget)
+                              QToolBar, QFileDialog, QMessageBox, QDockWidget, QFrame)
 from PySide6.QtCore import Qt, Slot, QSettings
 from PySide6.QtGui import QAction, QKeySequence
 
@@ -38,10 +38,17 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         
         # Add video player to main layout
-        main_layout.addWidget(self.video_player, 3)
+        main_layout.addWidget(self.video_player, 4)
         
-        # Add timeline to main layout
-        main_layout.addWidget(self.timeline, 1)
+        # Add a separator line
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        separator.setLineWidth(1)
+        main_layout.addWidget(separator)
+        
+        # Add timeline to main layout with more space
+        main_layout.addWidget(self.timeline, 2)
         
         # Create dock widget for label panel
         label_dock = QDockWidget("Labels", self)
@@ -112,6 +119,13 @@ class MainWindow(QMainWindow):
             if success:
                 self.timeline.clear()
                 self.label_panel.clear()
+                
+                # Explicitly set the frame count
+                self.timeline.set_frame_count(self.video_player.frame_count)
+                
+                # Ensure timeline gets updated
+                self.timeline.update()
+                
                 self.save_project_action.setEnabled(True)
                 self.export_labels_action.setEnabled(True)
             else:

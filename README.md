@@ -62,6 +62,10 @@ A video labeling tool built with PySide6 that allows you to mark and annotate pe
 
 - Left/Right arrow keys: Move one frame backward/forward
 - Delete key: Delete the selected label
+-- new added -- 
+- X change to cut mode
+- C change to choose mode
+
 
 ## License
 
