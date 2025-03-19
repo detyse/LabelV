@@ -106,6 +106,10 @@ class TimelineWidget(QWidget):
     RESIZING_LABEL_START = 4
     RESIZING_LABEL_END = 5
     
+    # Operation modes
+    CHOOSE_MODE = 0  # For scrolling and navigating
+    EDIT_MODE = 1    # For creating and editing labels
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         
@@ -126,6 +130,9 @@ class TimelineWidget(QWidget):
         self.selected_label_idx = -1
         self.hover_label_idx = -1
         self.drag_start_frame = 0
+        
+        # Current operation mode - default to CHOOSE_MODE for safer navigation
+        self.current_mode = self.CHOOSE_MODE
         
         # UI settings
         self.timeline_height = 50
@@ -309,40 +316,16 @@ class TimelineWidget(QWidget):
         if not self.labels:
             return
             
-        # Group labels by category to draw them in separate tracks
-        categories = {}
+        # Use a single track for all labels
+        track_rect = QRectF(0, rect.top(), rect.width(), self.label_track_height)
+        
+        # Draw track background
+        bg_color = QColor(55, 55, 55)
+        painter.fillRect(track_rect, bg_color)
+        
+        # Draw labels in track
         for label in self.labels:
-            if label.category not in categories:
-                categories[label.category] = []
-            categories[label.category].append(label)
-        
-        # Calculate track height
-        num_tracks = max(1, len(categories))
-        track_height = min(self.label_track_height, rect.height() / num_tracks)
-        
-        # Draw each track
-        track_idx = 0
-        for category, category_labels in categories.items():
-            track_y = rect.top() + track_idx * track_height
-            track_rect = QRectF(0, track_y, rect.width(), track_height)
-            
-            # Draw track background with slight alternating colors
-            bg_color = QColor(55, 55, 55) if track_idx % 2 == 0 else QColor(50, 50, 50)
-            painter.fillRect(track_rect, bg_color)
-            
-            # Draw category name
-            painter.setPen(QColor(200, 200, 200))
-            font = QFont()
-            font.setPointSize(8)
-            painter.setFont(font)
-            text_rect = QRectF(5, track_y, 100, track_height)
-            painter.drawText(text_rect, Qt.AlignVCenter, category)
-            
-            # Draw labels in this track
-            for label in category_labels:
-                self.draw_label(painter, label, track_rect)
-            
-            track_idx += 1
+            self.draw_label(painter, label, track_rect)
     
     def draw_label(self, painter, label, track_rect):
         """Draw a single label on the timeline."""
@@ -394,6 +377,28 @@ class TimelineWidget(QWidget):
             painter.setPen(QPen(darker_color, 1))
             
         painter.drawRoundedRect(label_rect, 4, 4)
+        
+        # Draw resize handles more prominently when selected or hovered
+        if label.selected or (self.hover_label_idx >= 0 and self.labels[self.hover_label_idx].id == label.id):
+            # Draw start handle
+            start_handle_rect = QRectF(
+                label_rect.left(), 
+                label_rect.top(), 
+                self.resize_handle_width, 
+                label_rect.height()
+            )
+            painter.setPen(Qt.black)
+            painter.setBrush(QColor(255, 255, 255, 180))
+            painter.drawRect(start_handle_rect)
+            
+            # Draw end handle
+            end_handle_rect = QRectF(
+                label_rect.right() - self.resize_handle_width, 
+                label_rect.top(), 
+                self.resize_handle_width, 
+                label_rect.height()
+            )
+            painter.drawRect(end_handle_rect)
         
         # Draw label text if there's enough space
         if label_rect.width() > 30:
@@ -508,138 +513,242 @@ class TimelineWidget(QWidget):
                 break
     
     def find_label_at_position(self, pos):
-        """Find the label at the given position."""
-        if not self.labels:
-            return -1, self.NONE
+        """Find the label and region at the given position.
+        
+        Returns:
+            (index, region): 
+                - index: Index of the label (-1 if none)
+                - region: "start_handle", "end_handle", "body", or None
+        """
+        x, y = pos.x(), pos.y()
+        
+        # Calculate timeline area
+        timeline_rect = QRectF(0, 0, self.width(), self.timeline_height)
+        
+        # Define label track area
+        track_top = timeline_rect.bottom()
+        track_rect = QRectF(0, track_top, self.width(), self.label_track_height)
+        
+        # Check if position is in the label track area
+        if y >= track_rect.top() and y <= track_rect.bottom():
+            # Calculate visible range
+            visible_width = self.width()
+            visible_range = visible_width / self.zoom_level
+            start_frame = max(0, int(self.offset))
+            end_frame = min(self.frame_count, int(start_frame + visible_range))
             
-        frame = self.get_frame_at_position(pos.x())
-        
-        # Check for labels containing this frame
-        for i, label in enumerate(self.labels):
-            if label.contains_frame(frame):
-                start_x = self.get_position_for_frame(label.start_frame)
-                end_x = self.get_position_for_frame(label.end_frame)
+            if start_frame >= end_frame:
+                return -1, None
+            
+            # Check each label
+            for i, label in enumerate(self.labels):
+                # Skip if label is outside visible range
+                if label.end_frame < start_frame or label.start_frame > end_frame:
+                    continue
                 
-                # Check if clicked near the resize handles
-                if abs(pos.x() - start_x) <= self.resize_handle_width:
-                    return i, self.RESIZING_LABEL_START
-                elif abs(pos.x() - end_x) <= self.resize_handle_width:
-                    return i, self.RESIZING_LABEL_END
-                else:
-                    return i, self.MOVING_LABEL
+                # Convert label frames to pixel positions
+                label_left = self.get_position_for_frame(label.start_frame)
+                label_right = self.get_position_for_frame(label.end_frame)
+                
+                label_rect = QRectF(
+                    label_left, 
+                    track_rect.top(), 
+                    label_right - label_left, 
+                    track_rect.height()
+                )
+                
+                # Check for resize handles first (they take priority)
+                # Start handle
+                start_handle_rect = QRectF(
+                    label_rect.left(), 
+                    label_rect.top(), 
+                    self.resize_handle_width * 2,  # Make handle easier to grab 
+                    label_rect.height()
+                )
+                if start_handle_rect.contains(x, y):
+                    return i, "start_handle"
+                
+                # End handle
+                end_handle_rect = QRectF(
+                    label_rect.right() - self.resize_handle_width * 2,  # Make handle easier to grab
+                    label_rect.top(), 
+                    self.resize_handle_width * 2, 
+                    label_rect.height()
+                )
+                if end_handle_rect.contains(x, y):
+                    return i, "end_handle"
+                
+                # Body
+                if label_rect.contains(x, y):
+                    return i, "body"
         
-        return -1, self.NONE
+        return -1, None
     
     def mousePressEvent(self, event):
         """Handle mouse press events."""
         if event.button() == Qt.LeftButton:
             # Calculate frame at click position
             click_frame = self.get_frame_at_position(event.position().x())
+            
+            # Store mouse position and frame for potential drag operations
             self.mouse_down_pos = event.position()
             self.mouse_down_frame = click_frame
             
-            # Check if clicked on a label
-            label_idx, action = self.find_label_at_position(event.position())
+            # Check if we're in CHOOSE_MODE (just for navigation)
+            if self.current_mode == self.CHOOSE_MODE:
+                # In CHOOSE_MODE, we only allow position seeking
+                self.current_frame = click_frame
+                self.position_changed.emit(self.current_frame)
+                self.state = self.DRAGGING_POSITION
+                self.update()
+                return
+            
+            # In EDIT_MODE - check if clicking on a label or resize handle
+            label_idx, region = self.find_label_at_position(event.position())
             
             if label_idx >= 0:
                 # Clicked on a label
-                self.selected_label_idx = label_idx
-                for i, label in enumerate(self.labels):
-                    label.selected = (i == label_idx)
-                    
-                # Emit signal for selected label
-                self.label_selected.emit(self.labels[label_idx].id)
-                
-                # Set the action state
-                self.state = action
-                
-                if self.state == self.MOVING_LABEL:
-                    # Store initial position for dragging
-                    self.drag_start_frame = self.labels[label_idx].start_frame
+                if region == "start_handle":
+                    # Clicked on start resize handle
+                    self.state = self.RESIZING_LABEL_START
+                    self.selected_label_idx = label_idx
+                    self.select_label(self.labels[label_idx].id)
+                elif region == "end_handle":
+                    # Clicked on end resize handle
+                    self.state = self.RESIZING_LABEL_END
+                    self.selected_label_idx = label_idx
+                    self.select_label(self.labels[label_idx].id)
+                elif region == "body":
+                    # Clicked on label body
+                    self.state = self.MOVING_LABEL
+                    self.selected_label_idx = label_idx
+                    self.drag_start_frame = click_frame
+                    self.select_label(self.labels[label_idx].id)
             else:
                 # Clicked on empty space
-                if event.position().y() >= self.timeline_height:
-                    # Clicked in label area - start creating a new label
-                    self.state = self.CREATING_LABEL
-                    
-                    # Clear selection
-                    if self.selected_label_idx >= 0:
-                        self.labels[self.selected_label_idx].selected = False
-                        self.selected_label_idx = -1
-                else:
-                    # Clicked on timeline - change position
-                    self.current_frame = click_frame
-                    self.position_changed.emit(click_frame)
-                    self.state = self.DRAGGING_POSITION
+                self.state = self.CREATING_LABEL
+                
+                # Deselect any selected label
+                if self.selected_label_idx >= 0:
+                    self.labels[self.selected_label_idx].selected = False
+                    self.selected_label_idx = -1
+                
+                # Set current position
+                self.current_frame = click_frame
+                self.position_changed.emit(self.current_frame)
             
             self.update()
     
     def mouseMoveEvent(self, event):
         """Handle mouse move events."""
         if not self.mouse_down_pos:
-            # Update hover state
-            label_idx, _ = self.find_label_at_position(event.position())
-            if label_idx != self.hover_label_idx:
-                self.hover_label_idx = label_idx
-                self.update()
-                
-                # Change cursor based on what we're hovering over
-                if label_idx >= 0:
-                    start_x = self.get_position_for_frame(self.labels[label_idx].start_frame)
-                    end_x = self.get_position_for_frame(self.labels[label_idx].end_frame)
-                    
-                    # Change cursor based on position
-                    if abs(event.position().x() - start_x) <= self.resize_handle_width:
-                        self.setCursor(Qt.SizeHorCursor)  # Left resize
-                    elif abs(event.position().x() - end_x) <= self.resize_handle_width:
-                        self.setCursor(Qt.SizeHorCursor)  # Right resize
-                    else:
-                        self.setCursor(Qt.SizeAllCursor)  # Move
-                else:
-                    self.setCursor(Qt.ArrowCursor)  # Default cursor
-                
-            return
+            # Just hovering (no mouse button pressed)
             
-        # Calculate frame at current position
+            # Check if mouse is over a label for hover effects
+            hover_idx, hover_region = self.find_label_at_position(event.position())
+            
+            if hover_idx != self.hover_label_idx:
+                self.hover_label_idx = hover_idx
+                self.update()
+            
+            # Set appropriate cursor based on hover region and mode
+            if self.current_mode == self.EDIT_MODE and hover_idx >= 0:
+                if hover_region == "start_handle" or hover_region == "end_handle":
+                    self.setCursor(Qt.SizeHorCursor)
+                elif hover_region == "body":
+                    self.setCursor(Qt.OpenHandCursor)
+                else:
+                    self.setCursor(Qt.CrossCursor)
+            elif self.current_mode == self.CHOOSE_MODE:
+                self.setCursor(Qt.ArrowCursor)
+            else:
+                self.setCursor(Qt.CrossCursor)
+            
+            return
+        
+        # Get frame at current mouse position
         current_frame = self.get_frame_at_position(event.position().x())
         
+        if self.current_mode == self.CHOOSE_MODE:
+            # In CHOOSE_MODE, we only allow position seeking
+            if self.state == self.DRAGGING_POSITION:
+                self.current_frame = current_frame
+                self.position_changed.emit(self.current_frame)
+                self.update()
+            return
+        
+        # Handle different drag states
         if self.state == self.DRAGGING_POSITION:
-            # Update position while dragging
+            # Update current position
             self.current_frame = current_frame
-            self.position_changed.emit(current_frame)
-            
+            self.position_changed.emit(self.current_frame)
+        
         elif self.state == self.CREATING_LABEL:
-            # Nothing to do while creating - will create on mouse release
-            self.update()
-            
+            # Update position for label preview
+            self.current_frame = current_frame
+            self.position_changed.emit(self.current_frame)
+        
         elif self.state == self.MOVING_LABEL and self.selected_label_idx >= 0:
-            # Move the label
+            # Move the selected label
             label = self.labels[self.selected_label_idx]
-            frame_delta = current_frame - self.mouse_down_frame
             
-            new_start = self.drag_start_frame + frame_delta
-            label_duration = label.duration()
+            # Calculate frame delta
+            frame_delta = current_frame - self.drag_start_frame
             
-            # Ensure label stays within bounds
-            if new_start < 0:
-                new_start = 0
-            elif new_start + label_duration >= self.frame_count:
-                new_start = self.frame_count - label_duration - 1
+            # Calculate new start and end with boundary checks
+            new_start = max(0, label.start_frame + frame_delta)
+            new_end = min(self.frame_count - 1, label.end_frame + frame_delta)
             
+            # Ensure we don't change the duration
+            duration = label.end_frame - label.start_frame
+            if new_end - new_start != duration:
+                if new_end >= self.frame_count - 1:
+                    # Hit right boundary
+                    new_start = new_end - duration
+                else:
+                    # Hit left boundary or other constraint
+                    new_end = new_start + duration
+            
+            # Update label positions
             label.start_frame = new_start
-            label.end_frame = new_start + label_duration
+            label.end_frame = new_end
             
+            # Update drag reference point
+            self.drag_start_frame = current_frame
+            
+            # Update current position to follow the label
+            self.current_frame = current_frame
+            self.position_changed.emit(self.current_frame)
+        
         elif self.state == self.RESIZING_LABEL_START and self.selected_label_idx >= 0:
-            # Resize the label start
+            # Resize the label by moving its start point
             label = self.labels[self.selected_label_idx]
-            new_start = min(current_frame, label.end_frame - 1)
-            label.start_frame = max(0, new_start)
             
+            # Ensure new start is valid (not beyond end)
+            new_start = min(current_frame, label.end_frame - 1)
+            new_start = max(0, new_start)  # Ensure not negative
+            
+            # Update label
+            label.start_frame = new_start
+            
+            # Update current position
+            self.current_frame = new_start
+            self.position_changed.emit(self.current_frame)
+        
         elif self.state == self.RESIZING_LABEL_END and self.selected_label_idx >= 0:
-            # Resize the label end
+            # Resize the label by moving its end point
             label = self.labels[self.selected_label_idx]
+            
+            # Ensure new end is valid (not before start)
             new_end = max(current_frame, label.start_frame + 1)
-            label.end_frame = min(self.frame_count - 1, new_end)
+            new_end = min(self.frame_count - 1, new_end)  # Ensure not beyond video
+            
+            # Update label
+            label.end_frame = new_end
+            
+            # Update current position
+            self.current_frame = new_end
+            self.position_changed.emit(self.current_frame)
         
         self.update()
     
@@ -649,15 +758,20 @@ class TimelineWidget(QWidget):
             # Calculate frame at release position
             release_frame = self.get_frame_at_position(event.position().x())
             
-            if self.state == self.CREATING_LABEL:
+            if self.state == self.CREATING_LABEL and self.current_mode == self.EDIT_MODE:
                 # Create a new label
                 start_frame = min(self.mouse_down_frame, release_frame)
                 end_frame = max(self.mouse_down_frame, release_frame)
                 
                 # Only create if it spans at least 1 frame
                 if end_frame > start_frame:
+                    # Create label with sequential number as name
+                    next_number = len(self.labels) + 1
+                    
+                    # Create label with simple name
                     label = Label(
-                        name="New Label",
+                        name=f"Label {next_number}",
+                        category="default",  # Keep default category for compatibility
                         start_frame=start_frame,
                         end_frame=end_frame
                     )
@@ -737,6 +851,20 @@ class TimelineWidget(QWidget):
                 self.current_frame += 1
                 self.position_changed.emit(self.current_frame)
                 self.update()
+        elif event.key() == Qt.Key_C:
+            # Switch to CHOOSE mode (for scrolling/navigating)
+            self.current_mode = self.CHOOSE_MODE
+            self.setCursor(Qt.ArrowCursor)
+            # Show status message (requires MainWindow connection)
+            if hasattr(self, 'parent') and hasattr(self.parent(), 'statusBar'):
+                self.parent().statusBar().showMessage("Choose/Scroll Mode: Navigate without affecting labels", 2000)
+        elif event.key() == Qt.Key_X:
+            # Switch to EDIT mode (for creating/modifying labels)
+            self.current_mode = self.EDIT_MODE
+            self.setCursor(Qt.CrossCursor)
+            # Show status message (requires MainWindow connection)
+            if hasattr(self, 'parent') and hasattr(self.parent(), 'statusBar'):
+                self.parent().statusBar().showMessage("Edit Mode: Create and adjust labels", 2000)
     
     def get_labels(self):
         """Get all labels as dictionaries for serialization."""
@@ -800,4 +928,28 @@ class TimelineWidget(QWidget):
         # Draw handle
         painter.setBrush(QColor(255, 0, 0))
         painter.setPen(QPen(QColor(200, 200, 200), 1))
-        painter.drawEllipse(handle_rect) 
+        painter.drawEllipse(handle_rect)
+    
+    def get_next_label_number(self, category="default"):
+        """Get the next sequential number for a label in this category."""
+        category_labels = [l for l in self.labels if l.category == category]
+        
+        # Extract existing numbers from labels
+        existing_numbers = []
+        for label in category_labels:
+            # Try to extract the number from the label name
+            # Expected format: "category-number" or just "number"
+            name_parts = label.name.split('-')
+            if len(name_parts) > 1 and name_parts[-1].isdigit():
+                existing_numbers.append(int(name_parts[-1]))
+            elif label.name.isdigit():
+                existing_numbers.append(int(label.name))
+        
+        # Find the next available number
+        if not existing_numbers:
+            return 1
+        return max(existing_numbers) + 1
+    
+    def frame_to_position(self, frame):
+        """Convert frame number to x position on the timeline (alias for get_position_for_frame)."""
+        return self.get_position_for_frame(frame) 

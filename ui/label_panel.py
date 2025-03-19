@@ -115,13 +115,6 @@ class LabelPanel(QWidget):
         self.name_edit.textChanged.connect(self.on_label_property_changed)
         form_layout.addRow("Name:", self.name_edit)
         
-        # Category
-        self.category_combo = QComboBox()
-        self.category_combo.addItems(self.categories)
-        self.category_combo.setEditable(True)
-        self.category_combo.currentTextChanged.connect(self.on_label_property_changed)
-        form_layout.addRow("Category:", self.category_combo)
-        
         # Color
         self.color_button = ColorButton()
         self.color_button.colorChanged.connect(self.on_label_property_changed)
@@ -162,7 +155,6 @@ class LabelPanel(QWidget):
     def set_editor_enabled(self, enabled):
         """Enable or disable the label editor."""
         self.name_edit.setEnabled(enabled)
-        self.category_combo.setEnabled(enabled)
         self.color_button.setEnabled(enabled)
         self.description_edit.setEnabled(enabled)
     
@@ -178,13 +170,17 @@ class LabelPanel(QWidget):
         """Add a new label."""
         # Create a new label
         label_id = str(uuid.uuid4())
+        
+        # Get the next number based on existing labels
+        count = self.label_list.count() + 1
+        
         label_data = {
             "id": label_id,
-            "name": "New Label",
+            "name": f"Label {count}",
             "start_frame": 0,
             "end_frame": 0,
             "color": [255, 165, 0, 180],  # Orange with transparency
-            "category": "default",
+            "category": "default",  # Keep for compatibility
             "description": ""
         }
         
@@ -232,7 +228,6 @@ class LabelPanel(QWidget):
         label_data = {
             "id": self.current_label_id,
             "name": self.name_edit.text(),
-            "category": self.category_combo.currentText(),
             "color": [
                 self.color_button.color().red(),
                 self.color_button.color().green(),
@@ -246,7 +241,7 @@ class LabelPanel(QWidget):
         for i in range(self.label_list.count()):
             item = self.label_list.item(i)
             if item.data(Qt.UserRole) == self.current_label_id:
-                item.setText(f"{label_data['name']} ({label_data['category']})")
+                item.setText(f"{label_data['name']}")
                 
                 # Set color of item
                 pixmap = QPixmap(16, 16)
@@ -288,15 +283,13 @@ class LabelPanel(QWidget):
         """Add a label to the list widget."""
         label_id = label_data["id"]
         label_name = label_data.get("name", "Unnamed")
-        category = label_data.get("category", "default")
-        color_rgba = label_data.get("color", [255, 165, 0, 180])
         
         # Create list item
-        item = QListWidgetItem(f"{label_name} ({category})")
+        item = QListWidgetItem(f"{label_name}")
         item.setData(Qt.UserRole, label_id)
         
         # Create color icon
-        color = QColor(*color_rgba)
+        color = QColor(*label_data.get("color", [255, 165, 0, 180]))
         pixmap = QPixmap(16, 16)
         pixmap.fill(Qt.transparent)
         
@@ -317,13 +310,6 @@ class LabelPanel(QWidget):
         
         # Update form fields
         self.name_edit.setText(label_data.get("name", ""))
-        
-        category = label_data.get("category", "default")
-        index = self.category_combo.findText(category)
-        if index >= 0:
-            self.category_combo.setCurrentIndex(index)
-        else:
-            self.category_combo.setCurrentText(category)
             
         color_rgba = label_data.get("color", [255, 165, 0, 180])
         self.color_button.setColor(QColor(*color_rgba))
