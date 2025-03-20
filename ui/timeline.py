@@ -715,23 +715,24 @@ class TimelineWidget(QWidget):
         
         self.update()
     
-    def select_label_at_index(self, index):
-        """Select the label at the given index and emit appropriate signals."""
-        if index < 0 or index >= len(self.labels):
-            return False
+    def select_label_at_index(self, idx):
+        """Select the label at the given index."""
+        if idx < 0 or idx >= len(self.labels):
+            return
         
         # Deselect previously selected label
         if self.selected_label_idx >= 0 and self.selected_label_idx < len(self.labels):
             self.labels[self.selected_label_idx].selected = False
         
         # Select the new label
-        self.labels[index].selected = True
-        self.selected_label_idx = index
+        self.selected_label_idx = idx
+        self.labels[idx].selected = True
         
-        # Emit signal
-        self.label_selected.emit(self.labels[index].id)
+        # Emit signal with label ID
+        label_id = self.labels[idx].id
+        self.label_selected.emit(label_id)
         
-        return True
+        self.update()
     
     def mouseMoveEvent(self, event):
         """Handle mouse move events."""

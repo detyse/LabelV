@@ -64,6 +64,9 @@ class MainWindow(QMainWindow):
         self.label_panel.label_deleted.connect(self.timeline.remove_label)
         self.label_panel.label_selected.connect(self.timeline.select_label)
         
+        # Connect timeline label selection to panel
+        self.timeline.label_selected.connect(self.on_timeline_label_selected)
+        
         # Connect label playback request to player
         self.timeline.label_playback_requested.connect(self.play_label_segment)
         
@@ -322,6 +325,22 @@ class MainWindow(QMainWindow):
         """Handle when a label is created in the timeline."""
         # Add the label to the label panel
         self.label_panel.add_label_to_list(label_data)
+
+    def on_timeline_label_selected(self, label_id):
+        """Handle label selection in timeline by updating label panel."""
+        # Find the label data
+        for label in self.timeline.labels:
+            if label.id == label_id:
+                # Update the label panel with this data
+                self.label_panel.update_label_data(label.to_dict())
+                
+                # Also select the corresponding item in the label list
+                for i in range(self.label_panel.label_list.count()):
+                    item = self.label_panel.label_list.item(i)
+                    if item.data(Qt.UserRole) == label_id:
+                        self.label_panel.label_list.setCurrentItem(item)
+                        break
+                break
 
     def eventFilter(self, obj, event):
         """Global event filter to handle keyboard shortcuts."""
