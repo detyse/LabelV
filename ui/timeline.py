@@ -153,6 +153,9 @@ class TimelineWidget(QWidget):
         
         # Track management
         self.tracks = []  # Will store track occupation data
+        
+        # Debug mode
+        self.debug_mode = False  # Set to True to show selection regions
     
     def get_frame_at_position(self, x_pos):
         """Convert x position to frame number."""
@@ -341,6 +344,27 @@ class TimelineWidget(QWidget):
                 track_top = rect.top() + track_idx * track_height
                 track_rect = QRectF(0, track_top, rect.width(), track_height)
                 self.draw_label(painter, label, track_rect)
+        
+        # Debug drawing
+        if self.debug_mode:
+            painter.setPen(QPen(QColor(255, 0, 0, 120), 1))
+            for label in self.labels:
+                if hasattr(label, 'track'):
+                    track_idx = label.track
+                    track_top = rect.top() + track_idx * track_height
+                    
+                    # Draw label hit areas
+                    label_left = self.get_position_for_frame(label.start_frame)
+                    label_right = self.get_position_for_frame(label.end_frame)
+                    
+                    # Draw selection area
+                    debug_rect = QRectF(
+                        label_left - 8,
+                        track_top,
+                        label_right - label_left + 16,
+                        track_height
+                    )
+                    painter.drawRect(debug_rect)
     
     def draw_label(self, painter, label, track_rect):
         """Draw a single label on the timeline."""
@@ -373,11 +397,11 @@ class TimelineWidget(QWidget):
         
         base_color = QColor(label.color)
         if label.selected:
-            # Make selected labels brighter and more distinctive
-            base_color = base_color.lighter(140)
+            # Make selected labels significantly brighter for better visibility
+            base_color = base_color.lighter(160)  # Increase from 140 to 160
         elif is_hovered:
-            # Make hovered labels slightly brighter
-            base_color = base_color.lighter(115)
+            # Make hovered labels more noticeable
+            base_color = base_color.lighter(125)  # Increase from 115 to 125
             
         darker_color = base_color.darker(130)
         gradient.setColorAt(0, base_color)
@@ -388,10 +412,10 @@ class TimelineWidget(QWidget):
         
         # Draw border
         if label.selected:
-            # Add glow effect for selected labels
-            glow_pen = QPen(QColor(255, 255, 255, 200), 2.5)
+            # Add stronger glow effect for selected labels
+            glow_pen = QPen(QColor(255, 255, 255, 230), 3)  # Wider, more opaque
             painter.setPen(glow_pen)
-            painter.drawRoundedRect(label_rect.adjusted(-1, -1, 1, 1), 4, 4)
+            painter.drawRoundedRect(label_rect.adjusted(-1.5, -1.5, 1.5, 1.5), 4, 4)
             
             # Draw actual border
             painter.setPen(QPen(QColor(255, 255, 255), 2))
@@ -569,9 +593,9 @@ class TimelineWidget(QWidget):
     
     def select_label_by_id(self, label_id):
         """Helper to select a label by ID."""
-        # Clear current selection
-        if self.selected_label_idx >= 0:
-            self.labels[self.selected_label_idx].selected = False
+        # Always clear all selections first
+        for label in self.labels:
+            label.selected = False
         
         # Find and select the label
         self.selected_label_idx = -1
@@ -590,11 +614,14 @@ class TimelineWidget(QWidget):
         
         # Check if position is in the label tracks area
         if y >= timeline_rect.bottom() and y < self.height():
-            # Get visible frame range
-            visible_width = self.width()
-            visible_range = visible_width / self.zoom_level
+            # Get visible frame range - fix calculation
+            visible_frames = self.frame_count / self.zoom_level
             start_frame = max(0, int(self.offset))
-            end_frame = min(self.frame_count, int(start_frame + visible_range))
+            end_frame = min(self.frame_count, int(self.offset + visible_frames))
+            
+            # Debug output if enabled
+            if self.debug_mode:
+                print(f"Mouse at: {x}, {y}, Visible frames: {start_frame}-{end_frame}")
             
             if start_frame >= end_frame:
                 return -1, None
@@ -603,8 +630,8 @@ class TimelineWidget(QWidget):
             for i in range(len(self.labels) - 1, -1, -1):
                 label = self.labels[i]
                 
-                # Skip if label is outside visible range
-                if label.end_frame < start_frame or label.start_frame > end_frame:
+                # Skip if label is outside visible range - more lenient check
+                if label.end_frame < start_frame - 10 or label.start_frame > end_frame + 10:
                     continue
                 
                 # Calculate track position
@@ -612,8 +639,8 @@ class TimelineWidget(QWidget):
                 track_top = timeline_rect.bottom() + track_idx * self.label_track_height
                 track_rect = QRectF(0, track_top, self.width(), self.label_track_height)
                 
-                # Check if click is within track height
-                if y >= track_rect.top() and y <= track_rect.bottom():
+                # Check if click is within track height with more tolerance
+                if y >= track_rect.top() - 2 and y <= track_rect.bottom() + 2:
                     # Convert label frames to pixel positions
                     label_left = self.get_position_for_frame(label.start_frame)
                     label_right = self.get_position_for_frame(label.end_frame)
@@ -622,29 +649,33 @@ class TimelineWidget(QWidget):
                     if (label_right - label_left) < 10:
                         label_right = label_left + 10
                     
-                    # Increase margins for easier selection
+                    # Increase margins for easier selection (increase to 10)
                     label_rect = QRectF(
-                        label_left - 5, 
+                        label_left - 10, 
                         track_rect.top(), 
-                        label_right - label_left + 10, 
+                        label_right - label_left + 20, 
                         track_rect.height()
                     )
+                    
+                    # Debug visualization if enabled
+                    if self.debug_mode:
+                        print(f"Label {i} ({label.name}): rect={label_rect}, contains={label_rect.contains(x, y)}")
                     
                     if label_rect.contains(x, y):
                         # Detect which part was clicked
                         start_handle_rect = QRectF(
-                            label_left - 5, 
+                            label_left - 10, 
                             track_rect.top(), 
-                            self.resize_handle_width + 10, 
+                            self.resize_handle_width + 20, 
                             track_rect.height()
                         )
                         if start_handle_rect.contains(x, y):
                             return i, "start_handle"
                         
                         end_handle_rect = QRectF(
-                            label_right - self.resize_handle_width - 5, 
+                            label_right - self.resize_handle_width - 10, 
                             track_rect.top(), 
-                            self.resize_handle_width + 10, 
+                            self.resize_handle_width + 20, 
                             track_rect.height()
                         )
                         if end_handle_rect.contains(x, y):
@@ -681,8 +712,14 @@ class TimelineWidget(QWidget):
                 # In CHOOSE_MODE, request playback
                 if self.current_mode == self.CHOOSE_MODE:
                     label = self.labels[label_idx]
-                    self.label_playback_requested.emit(label.start_frame, label.end_frame)
-                    self.state = self.NONE  # Prevent dragging
+                    # Don't immediately emit playback signal - defer it
+                    # self.label_playback_requested.emit(label.start_frame, label.end_frame)
+                    # Don't reset state immediately
+                    # self.state = self.NONE  # This prevents drag operations
+                    
+                    # Allow the selection to be visible first
+                    self.state = self.DRAGGING_POSITION
+                    # We'll emit the playback signal on mouse release instead
                 else:  # EDIT_MODE
                     # Set appropriate state for label manipulation
                     if region == "start_handle":
@@ -771,6 +808,12 @@ class TimelineWidget(QWidget):
         # Get frame at current mouse position
         current_frame = self.get_frame_at_position(event.position().x())
         
+        # Add a small drag threshold to prevent accidental moves
+        if self.state == self.MOVING_LABEL:
+            # Only start moving if we've moved at least 2 frames
+            if abs(current_frame - self.mouse_down_frame) < 2:
+                return
+        
         # Handle different drag states
         if self.state == self.DRAGGING_POSITION:
             # Update current position
@@ -845,8 +888,11 @@ class TimelineWidget(QWidget):
         
         # LEFT MOUSE BUTTON RELEASE
         if event.button() == Qt.LeftButton:
-            # Most operations just need to reset state
-            pass
+            # If we've clicked a label in CHOOSE_MODE, now play it
+            if self.current_mode == self.CHOOSE_MODE and self.selected_label_idx >= 0:
+                label = self.labels[self.selected_label_idx]
+                # Now emit the playback signal
+                self.label_playback_requested.emit(label.start_frame, label.end_frame)
         
         # RIGHT MOUSE BUTTON RELEASE
         elif event.button() == Qt.RightButton:
@@ -1119,6 +1165,9 @@ class TimelineWidget(QWidget):
             self.update()  # Redraw the timeline with new mode settings
         else:
             print(f"Invalid mode: {mode}")
-
-
     
+    def toggle_debug_mode(self):
+        """Toggle debug visualization mode."""
+        self.debug_mode = not self.debug_mode
+        print(f"Debug mode: {'ON' if self.debug_mode else 'OFF'}")
+        self.update()

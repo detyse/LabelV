@@ -48,12 +48,12 @@ A video labeling tool built with PySide6 that allows you to mark and annotate pe
 
 4. Two operating modes are available (toggle with keyboard shortcuts):
    - View Mode (C): For navigating and playing labeled segments
-     - Clicking on a label plays that segment
+     - Clicking on a label plays that segment with Left Mouse
      - Creating/editing labels is disabled
    - Edit Mode (X): For creating and adjusting labels
-     - Create labels by clicking and dragging on the timeline
-     - Adjust label boundaries by dragging the handles at the start or end
-     - Move labels by dragging the middle section
+     - Create labels by clicking and dragging on the timeline with Right Mouse
+     - Adjust label boundaries by dragging the handles at the start or end with Left Mouse
+     - Move labels by dragging the middle section with Left Mouse
 
 5. Label format and management:
    - Labels are formatted as "1. action_name" for clarity
