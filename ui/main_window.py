@@ -108,6 +108,17 @@ class MainWindow(QMainWindow):
         self.export_labels_action = QAction("Export Labels", self)
         self.export_labels_action.setEnabled(False)
         self.export_labels_action.triggered.connect(self.export_labels)
+        
+        # Mode actions
+        self.mode_action_choose = QAction("View Mode", self)
+        self.mode_action_choose.setShortcut(QKeySequence("C"))
+        self.mode_action_choose.setCheckable(True)
+        self.mode_action_choose.triggered.connect(lambda: self.timeline.set_mode(self.timeline.CHOOSE_MODE))
+        
+        self.mode_action_edit = QAction("Edit Mode", self)
+        self.mode_action_edit.setShortcut(QKeySequence("X"))
+        self.mode_action_edit.setCheckable(True)
+        self.mode_action_edit.triggered.connect(lambda: self.timeline.set_mode(self.timeline.EDIT_MODE))
     
     def create_toolbar(self):
         """Create application toolbar."""
@@ -117,17 +128,36 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.open_video_action)
         toolbar.addAction(self.save_project_action)
         toolbar.addAction(self.export_labels_action)
+        
+        # Add separator
+        toolbar.addSeparator()
+        
+        # Add mode actions
+        toolbar.addAction(self.mode_action_choose)
+        toolbar.addAction(self.mode_action_edit)
     
     def update_mode(self, mode):
-        """Update the UI based on the current mode."""
-        if mode == self.timeline.CHOOSE_MODE:  # View mode
-            # Disable label editing
-            self.label_panel.add_label_button.setEnabled(False)
-            self.statusBar().showMessage("View Mode: Navigate and play labeled segments", 2000)
-        else:  # Edit mode
-            # Enable label editing
-            self.label_panel.add_label_button.setEnabled(True)
-            self.statusBar().showMessage("Edit Mode: Create and modify labels", 2000)
+        """Update UI based on timeline mode."""
+        if mode == self.timeline.CHOOSE_MODE:
+            # View mode - disable label editing
+            self.mode_action_choose.setChecked(True)
+            self.mode_action_edit.setChecked(False)
+            
+            # No need to disable a button that doesn't exist anymore
+            # self.label_panel.add_label_button.setEnabled(False)
+            
+            # Set status message
+            self.statusBar().showMessage("View Mode: Select labels to play segments", 2000)
+        else:  # EDIT_MODE
+            # Edit mode - enable label editing
+            self.mode_action_choose.setChecked(False)
+            self.mode_action_edit.setChecked(True)
+            
+            # No need to enable a button that doesn't exist anymore
+            # self.label_panel.add_label_button.setEnabled(True)
+            
+            # Set status message
+            self.statusBar().showMessage("Edit Mode: Right-click and drag to create labels", 2000)
 
     def handle_timeline_key_press(self, event):
         """Handle timeline widget key presses."""

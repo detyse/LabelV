@@ -5,7 +5,7 @@ import uuid
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                               QLabel, QLineEdit, QListWidget, QListWidgetItem,
                               QColorDialog, QComboBox, QTextEdit, QFormLayout,
-                              QGroupBox, QSplitter, QFrame, QMenu)
+                              QGroupBox, QSplitter, QFrame, QMenu, QPlainTextEdit)
 from PySide6.QtCore import Qt, Signal, Slot, QSize
 from PySide6.QtGui import QColor, QIcon, QPixmap, QBrush, QPainter
 
@@ -79,76 +79,56 @@ class LabelPanel(QWidget):
         """Set up the user interface."""
         layout = QVBoxLayout(self)
         
-        # Create label list section
-        list_group = QGroupBox("Labels")
-        list_layout = QVBoxLayout(list_group)
-        
-        # Label list
+        # Create list view for labels
         self.label_list = QListWidget()
         self.label_list.setSelectionMode(QListWidget.SingleSelection)
         self.label_list.currentItemChanged.connect(self.on_label_selected)
-        list_layout.addWidget(self.label_list)
-        
-        # Add/Remove buttons
-        buttons_layout = QHBoxLayout()
-        
-        self.add_label_button = QPushButton("New Label")
-        self.add_label_button.clicked.connect(self.on_add_label)
-        buttons_layout.addWidget(self.add_label_button)
-        
-        self.remove_label_button = QPushButton("Remove")
-        self.remove_label_button.setEnabled(False)
-        self.remove_label_button.clicked.connect(self.on_remove_label)
-        buttons_layout.addWidget(self.remove_label_button)
-        
-        list_layout.addLayout(buttons_layout)
+        layout.addWidget(self.label_list)
         
         # Create label editor section
-        editor_group = QGroupBox("Label Properties")
-        editor_layout = QVBoxLayout(editor_group)
+        editor_group = QGroupBox("Label Editor")
+        editor_layout = QFormLayout()
         
-        # Form layout for label properties
-        form_layout = QFormLayout()
-        
-        # Label name
+        # Label name edit
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("Label name")
-        self.name_edit.textChanged.connect(self.on_label_property_changed)
-        form_layout.addRow("Name:", self.name_edit)
+        self.name_edit.editingFinished.connect(self.on_label_property_changed)
+        editor_layout.addRow("Name:", self.name_edit)
         
-        # Color
+        # Color selector
         self.color_button = ColorButton()
         self.color_button.colorChanged.connect(self.on_label_property_changed)
-        form_layout.addRow("Color:", self.color_button)
+        editor_layout.addRow("Color:", self.color_button)
         
-        editor_layout.addLayout(form_layout)
+        # Description text edit
+        self.description_edit = QPlainTextEdit()
+        self.description_edit.setPlaceholderText("Enter description...")
+        self.description_edit.textChanged.connect(self.on_label_property_changed)
+        self.description_edit.setMaximumHeight(80)
+        editor_layout.addRow("Description:", self.description_edit)
         
         # Frame range display
-        range_layout = QHBoxLayout()
-        
         self.start_frame_label = QLabel("0")
-        range_layout.addWidget(QLabel("Start Frame:"))
-        range_layout.addWidget(self.start_frame_label)
-        range_layout.addStretch()
-        
         self.end_frame_label = QLabel("0")
-        range_layout.addWidget(QLabel("End Frame:"))
-        range_layout.addWidget(self.end_frame_label)
+        frame_layout = QHBoxLayout()
+        frame_layout.addWidget(self.start_frame_label)
+        frame_layout.addWidget(QLabel("-"))
+        frame_layout.addWidget(self.end_frame_label)
+        editor_layout.addRow("Frames:", frame_layout)
         
-        editor_layout.addLayout(range_layout)
+        # Set the layout for the editor group
+        editor_group.setLayout(editor_layout)
+        layout.addWidget(editor_group)
         
-        # Description
-        editor_layout.addWidget(QLabel("Description:"))
-        self.description_edit = QTextEdit()
-        self.description_edit.setMaximumHeight(80)
-        self.description_edit.textChanged.connect(self.on_label_property_changed)
-        editor_layout.addWidget(self.description_edit)
+        # Create button section
+        button_layout = QHBoxLayout()
         
-        # Add to layout with splitter
-        splitter = QSplitter(Qt.Vertical)
-        splitter.addWidget(list_group)
-        splitter.addWidget(editor_group)
-        layout.addWidget(splitter)
+        # Remove button
+        self.remove_button = QPushButton("Remove Label")
+        self.remove_button.clicked.connect(self.on_remove_label)
+        button_layout.addWidget(self.remove_button)
+        
+        layout.addLayout(button_layout)
         
         # Disable editor initially
         self.set_editor_enabled(False)
@@ -164,7 +144,7 @@ class LabelPanel(QWidget):
         self.label_list.clear()
         self.current_label_id = None
         self.set_editor_enabled(False)
-        self.remove_label_button.setEnabled(False)
+        self.remove_button.setEnabled(False)
     
     @Slot()
     def on_add_label(self):
@@ -274,7 +254,7 @@ class LabelPanel(QWidget):
         if not current:
             self.current_label_id = None
             self.set_editor_enabled(False)
-            self.remove_label_button.setEnabled(False)
+            self.remove_button.setEnabled(False)
             return
             
         # Get label ID from item
@@ -283,7 +263,7 @@ class LabelPanel(QWidget):
         
         # Enable editor and remove button
         self.set_editor_enabled(True)
-        self.remove_label_button.setEnabled(True)
+        self.remove_button.setEnabled(True)
         
         # Emit signal for selected label
         self.label_selected.emit(label_id)
@@ -410,7 +390,7 @@ class LabelPanel(QWidget):
         
         # Enable editor
         self.set_editor_enabled(True)
-        self.remove_label_button.setEnabled(True)
+        self.remove_button.setEnabled(True)
     
     def update_frame_range(self, label_id, start_frame, end_frame):
         """Update the displayed frame range for a label."""
