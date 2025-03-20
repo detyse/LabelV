@@ -5,7 +5,7 @@ A video labeling tool built with PySide6 that allows you to mark and annotate pe
 ## Features
 
 - Fast video loading with minimal memory footprint
-- Frame-by-frame navigation and playback
+- Frame-by-frame navigation and playback with adjustable speed
 - Timeline visualization with zooming support
 - Create, edit, and delete labels for time periods in videos
 - Support for overlapping labels with multi-track display
@@ -67,10 +67,21 @@ A video labeling tool built with PySide6 that allows you to mark and annotate pe
 
 ## Keyboard Shortcuts
 
+- Space: Toggle play/pause
 - Left/Right arrow keys: Move one frame backward/forward
 - Delete key: Delete the selected label
 - X: Switch to Edit Mode (for creating and adjusting labels)
 - C: Switch to View Mode (for navigation and playing labeled segments)
+
+## Playback Speed Control
+
+The application includes playback speed control ranging from 0.25x to 8.0x normal speed. 
+This allows for:
+- Slow-motion analysis of critical moments (0.25x, 0.5x)
+- Normal playback (1.0x)
+- Fast review of lengthy content (1.5x, 2.0x, 4.0x, 8.0x)
+
+Choose the appropriate speed from the dropdown in the video player controls.
 
 ## License
 

@@ -88,7 +88,7 @@ class MainWindow(QMainWindow):
         # Initialize UI mode based on the default timeline mode
         self.update_mode(self.timeline.current_mode)
         
-        # Install event filter to catch space bar press from anywhere
+        # Install event filter for global shortcuts
         self.installEventFilter(self)
     
     def create_actions(self):
@@ -289,16 +289,21 @@ class MainWindow(QMainWindow):
         self.video_player.play()
 
     def on_label_created(self, label_data):
-        """Handle a label created in the timeline."""
+        """Handle when a label is created in the timeline."""
+        # Add the label to the label panel
         self.label_panel.add_label_to_list(label_data)
 
     def eventFilter(self, obj, event):
-        """Global event filter to catch space bar press."""
-        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Space:
-            # Toggle video playback
-            if self.video_player.is_playing():
-                self.video_player.pause()
-            else:
-                self.video_player.play()
-            return True
+        """Global event filter to handle keyboard shortcuts."""
+        if event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Space:
+                # Toggle play/pause regardless of focus
+                if self.video_player.playing:
+                    self.video_player.toggle_play()
+                    return True  # Event handled
+                else:
+                    self.video_player.toggle_play()
+                    return True  # Event handled
+        
+        # Pass event to standard event processing
         return super().eventFilter(obj, event) 

@@ -356,7 +356,7 @@ class TimelineWidget(QWidget):
         label_rect = QRectF(
             start_x,
             track_rect.top() + margin,
-            max(4, end_x - start_x),  # Ensure minimum width of 4 pixels
+            max(5, end_x - start_x),  # Ensure minimum width for visibility
             track_rect.height() - 2 * margin
         )
         
@@ -373,8 +373,8 @@ class TimelineWidget(QWidget):
         
         base_color = QColor(label.color)
         if label.selected:
-            # Make selected labels brighter
-            base_color = base_color.lighter(130)
+            # Make selected labels brighter and more distinctive
+            base_color = base_color.lighter(140)
         elif is_hovered:
             # Make hovered labels slightly brighter
             base_color = base_color.lighter(115)
@@ -389,7 +389,7 @@ class TimelineWidget(QWidget):
         # Draw border
         if label.selected:
             # Add glow effect for selected labels
-            glow_pen = QPen(QColor(255, 255, 255, 180), 2.5)
+            glow_pen = QPen(QColor(255, 255, 255, 200), 2.5)
             painter.setPen(glow_pen)
             painter.drawRoundedRect(label_rect.adjusted(-1, -1, 1, 1), 4, 4)
             
@@ -485,13 +485,23 @@ class TimelineWidget(QWidget):
                 # Just the label name if space is limited
                 display_text = label.name
             
-            # Calculate text bounding rect
+            # Draw text with contrasting color for better visibility
             font_metrics = QFontMetrics(font)
             text_width = font_metrics.horizontalAdvance(display_text)
             
             if text_width + 10 <= label_rect.width():
                 text_rect = label_rect.adjusted(5, 0, -5, 0)
-                painter.setPen(QColor(0, 0, 0))
+                
+                # Choose text color based on background brightness
+                # for better contrast
+                qcolor = QColor(base_color)
+                brightness = (qcolor.red() * 299 + qcolor.green() * 587 + qcolor.blue() * 114) / 1000
+                
+                if brightness > 128:
+                    painter.setPen(QColor(0, 0, 0))  # Black text on light background
+                else:
+                    painter.setPen(QColor(255, 255, 255))  # White text on dark background
+                    
                 painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, display_text)
     
     @Slot(int)
@@ -572,13 +582,7 @@ class TimelineWidget(QWidget):
                 break
     
     def find_label_at_position(self, pos):
-        """Find the label and region at the given position.
-        
-        Returns:
-            (index, region): 
-                - index: Index of the label (-1 if none)
-                - region: "start_handle", "end_handle", "body", or None
-        """
+        """Find the label and region at the given position."""
         x, y = pos.x(), pos.y()
         
         # Calculate timeline area
@@ -616,73 +620,72 @@ class TimelineWidget(QWidget):
                     label_left = self.get_position_for_frame(label.start_frame)
                     label_right = self.get_position_for_frame(label.end_frame)
                     
+                    # Ensure minimum width for better hit detection (especially for short labels)
+                    if (label_right - label_left) < 10:
+                        label_right = label_left + 10
+                    
+                    # Create larger hit area for better selection
                     label_rect = QRectF(
-                        label_left, 
+                        label_left - 2, 
                         track_rect.top(), 
-                        label_right - label_left, 
+                        label_right - label_left + 4, 
                         track_rect.height()
                     )
                     
-                    # Add margin to make selection easier
-                    click_margin = 3
-                    
-                    # Check for resize handles first (they take priority)
-                    # Start handle (with margin)
-                    start_handle_rect = QRectF(
-                        label_rect.left() - click_margin, 
-                        label_rect.top(), 
-                        self.resize_handle_width + (click_margin * 2), 
-                        label_rect.height()
-                    )
-                    if start_handle_rect.contains(x, y):
-                        return i, "start_handle"
-                    
-                    # End handle (with margin)
-                    end_handle_rect = QRectF(
-                        label_rect.right() - self.resize_handle_width - click_margin, 
-                        label_rect.top(), 
-                        self.resize_handle_width + (click_margin * 2), 
-                        label_rect.height()
-                    )
-                    if end_handle_rect.contains(x, y):
-                        return i, "end_handle"
-                    
-                    # Body (with margin)
-                    expanded_rect = label_rect.adjusted(-click_margin, 0, click_margin, 0)
-                    if expanded_rect.contains(x, y):
+                    # Check if the click is within the label rectangle
+                    if label_rect.contains(x, y):
+                        # Detect which part of the label was clicked
+                        
+                        # Start handle with margin
+                        start_handle_rect = QRectF(
+                            label_left - 2, 
+                            track_rect.top(), 
+                            self.resize_handle_width + 4, 
+                            track_rect.height()
+                        )
+                        if start_handle_rect.contains(x, y):
+                            return i, "start_handle"
+                        
+                        # End handle with margin
+                        end_handle_rect = QRectF(
+                            label_right - self.resize_handle_width - 2, 
+                            track_rect.top(), 
+                            self.resize_handle_width + 4, 
+                            track_rect.height()
+                        )
+                        if end_handle_rect.contains(x, y):
+                            return i, "end_handle"
+                        
+                        # Must be the body
                         return i, "body"
+            
+            # No label found
+            return -1, None
         
+        # No label found
         return -1, None
     
     def mousePressEvent(self, event):
         """Handle mouse press events."""
         if event.button() == Qt.LeftButton:
-            # Calculate frame at click position
+            # Calculate frame at click position - FIX: Use get_frame_at_position instead of get_position_for_frame
             click_frame = self.get_frame_at_position(event.position().x())
             
             # Store mouse position and frame for potential drag operations
             self.mouse_down_pos = event.position()
             self.mouse_down_frame = click_frame
             
+            # Always check if clicking on a label first, regardless of mode
+            label_idx, region = self.find_label_at_position(event.position())
+            
             # Check if we're in CHOOSE_MODE (view mode)
             if self.current_mode == self.CHOOSE_MODE:
-                # Check if clicking on a label
-                label_idx, region = self.find_label_at_position(event.position())
-                
                 if label_idx >= 0:
                     # Clicked on a label in view mode - select it but don't allow modification
+                    self.select_label_at_index(label_idx)
+                    
+                    # Request playback of this segment
                     label = self.labels[label_idx]
-                    
-                    # First deselect any previously selected label
-                    if self.selected_label_idx >= 0 and self.selected_label_idx < len(self.labels):
-                        self.labels[self.selected_label_idx].selected = False
-                    
-                    # Select this label and update index
-                    label.selected = True
-                    self.selected_label_idx = label_idx
-                    
-                    # Emit signal and request playback
-                    self.label_selected.emit(label.id)
                     self.label_playback_requested.emit(label.start_frame, label.end_frame)
                 else:
                     # In view mode, clicking elsewhere just seeks
@@ -693,41 +696,26 @@ class TimelineWidget(QWidget):
                 self.update()
                 return
             
-            # In EDIT_MODE - check if clicking on a label or resize handle
-            label_idx, region = self.find_label_at_position(event.position())
-            
+            # In EDIT_MODE - first priority is handling existing labels
             if label_idx >= 0:
-                # Clicked on a label
-                
-                # First deselect any previously selected label
-                if self.selected_label_idx >= 0 and self.selected_label_idx < len(self.labels):
-                    self.labels[self.selected_label_idx].selected = False
-                
-                # Select this label
-                self.labels[label_idx].selected = True
-                self.selected_label_idx = label_idx
-                
-                # Emit selection signal 
-                self.label_selected.emit(self.labels[label_idx].id)
+                # Clicked on a label - select it and prepare for potential editing
+                self.select_label_at_index(label_idx)
                 
                 if region == "start_handle":
                     # Clicked on start resize handle
                     self.state = self.RESIZING_LABEL_START
-                    # Set cursor
                     self.setCursor(Qt.SizeHorCursor)
                 elif region == "end_handle":
                     # Clicked on end resize handle
                     self.state = self.RESIZING_LABEL_END
-                    # Set cursor
                     self.setCursor(Qt.SizeHorCursor)
                 elif region == "body":
                     # Clicked on label body
                     self.state = self.MOVING_LABEL
                     self.drag_start_frame = click_frame
-                    # Set cursor
                     self.setCursor(Qt.ClosedHandCursor)
             else:
-                # Clicked on empty space
+                # Clicked on empty space - create new label
                 self.state = self.CREATING_LABEL
                 
                 # Deselect any selected label
@@ -740,6 +728,24 @@ class TimelineWidget(QWidget):
                 self.position_changed.emit(self.current_frame)
             
             self.update()
+    
+    def select_label_at_index(self, index):
+        """Select the label at the given index and emit appropriate signals."""
+        if index < 0 or index >= len(self.labels):
+            return False
+        
+        # Deselect previously selected label
+        if self.selected_label_idx >= 0 and self.selected_label_idx < len(self.labels):
+            self.labels[self.selected_label_idx].selected = False
+        
+        # Select the new label
+        self.labels[index].selected = True
+        self.selected_label_idx = index
+        
+        # Emit signal
+        self.label_selected.emit(self.labels[index].id)
+        
+        return True
     
     def mouseMoveEvent(self, event):
         """Handle mouse move events."""
@@ -892,17 +898,21 @@ class TimelineWidget(QWidget):
                     
                     # Also emit the created signal with label data
                     self.label_created.emit(label.to_dict())
-            
-            # Reset cursor to appropriate default for mode
-            if self.current_mode == self.EDIT_MODE:
-                self.setCursor(Qt.CrossCursor)
-            else:
-                self.setCursor(Qt.ArrowCursor)
-            
-            # Reset state
-            self.state = self.NONE
-            self.mouse_down_pos = None
-            self.update()
+                    
+                    # Keep current frame at the end of the new label for better UX
+                    self.current_frame = end_frame
+                    self.position_changed.emit(self.current_frame)
+                
+                # Reset cursor to appropriate default for mode
+                if self.current_mode == self.EDIT_MODE:
+                    self.setCursor(Qt.CrossCursor)
+                else:
+                    self.setCursor(Qt.ArrowCursor)
+                
+                # Reset state
+                self.state = self.NONE
+                self.mouse_down_pos = None
+                self.update()
     
     def mouseDoubleClickEvent(self, event):
         """Handle mouse double click events."""
@@ -1000,13 +1010,13 @@ class TimelineWidget(QWidget):
             self.update()
     
     def format_time_compact(self, seconds):
-        """Format seconds to MM:SS or HH:MM:SS format depending on duration."""
+        """Format seconds to MM:SS or HH:MM:SS format."""
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         secs = int(seconds % 60)
         
         if hours > 0:
-            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+            return f"{hours}:{minutes:02d}:{secs:02d}"
         else:
             return f"{minutes:02d}:{secs:02d}"
     
@@ -1091,4 +1101,7 @@ class TimelineWidget(QWidget):
             if not assigned:
                 # Need to create a new track
                 self.tracks.append(label.end_frame)
-                label.track = len(self.tracks) - 1 
+                label.track = len(self.tracks) - 1
+
+
+    

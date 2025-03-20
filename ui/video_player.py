@@ -8,7 +8,7 @@ from pathlib import Path
 from collections import OrderedDict
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                              QSlider, QLabel, QSizePolicy)
+                              QSlider, QLabel, QSizePolicy, QComboBox)
 from PySide6.QtCore import (Qt, Signal, Slot, QThread, QMutex, QMutexLocker, 
                            QSize, QTimer, QThreadPool, QRunnable)
 from PySide6.QtWidgets import QStyle
@@ -101,6 +101,9 @@ class VideoPlayer(QWidget):
         self.play_timer = QTimer(self)
         self.play_timer.timeout.connect(self.next_frame)
         
+        # Playback speed
+        self.playback_speed = 1.0
+        
         # Create UI
         self.setup_ui()
     
@@ -138,6 +141,22 @@ class VideoPlayer(QWidget):
         # Time/frame display
         self.time_label = QLabel("00:00:00 / 00:00:00")
         controls_layout.addWidget(self.time_label)
+        
+        # Add speed control buttons
+        speed_layout = QHBoxLayout()
+        
+        speed_label = QLabel("Speed:")
+        self.speed_combo = QComboBox()
+        self.speed_combo.addItems(["0.25x", "0.5x", "1.0x", "1.5x", "2.0x", "4.0x", "8.0x"])
+        self.speed_combo.setCurrentIndex(2)  # Default to 1.0x
+        self.speed_combo.currentTextChanged.connect(self.set_playback_speed)
+        
+        speed_layout.addWidget(speed_label)
+        speed_layout.addWidget(self.speed_combo)
+        speed_layout.addStretch()
+        
+        # Add to controls layout
+        controls_layout.addLayout(speed_layout)
         
         layout.addLayout(controls_layout)
         
@@ -250,17 +269,32 @@ class VideoPlayer(QWidget):
             self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         else:
             self.playing = True
-            # Calculate interval based on FPS
-            interval = int(1000 / self.fps) if self.fps > 0 else 33  # Default to ~30fps
+            # Calculate interval based on FPS and playback speed
+            interval = int(1000 / (self.fps * self.playback_speed)) if self.fps > 0 else 33
+            # Ensure minimum interval to prevent UI freezing
+            interval = max(10, interval)
             self.play_timer.start(interval)
             self.play_button.setText("Pause")
             self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
     
     @Slot()
     def next_frame(self):
-        """Go to the next frame."""
+        """Move to the next frame."""
         if self.current_frame < self.frame_count - 1:
-            self.set_position(self.current_frame + 1)
+            # For higher speeds, skip appropriate number of frames
+            if self.playback_speed > 1.0:
+                frames_to_skip = round(self.playback_speed) - 1
+                next_frame = min(self.frame_count - 1, self.current_frame + 1 + frames_to_skip)
+            else:
+                next_frame = self.current_frame + 1
+            
+            self.set_position(next_frame)
+            
+            # Check if we've reached the end of playback range
+            if hasattr(self, 'playback_end_frame') and self.playback_end_frame is not None:
+                if self.current_frame >= self.playback_end_frame:
+                    self.pause()
+                    return
     
     @Slot()
     def previous_frame(self):
@@ -309,15 +343,21 @@ class VideoPlayer(QWidget):
 
     def play(self):
         """Start video playback."""
-        if not self.cap.isOpened():
+        if not self.cap or not self.cap.isOpened():
             return
         
+        self.playing = True
         self.is_playing_flag = True
+        self.play_button.setText("Pause")
         self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
         
         # Start playback timer if not running
         if not self.play_timer.isActive():
-            self.play_timer.start(int(1000 / self.fps))
+            # Calculate interval based on FPS and playback speed
+            interval = int(1000 / (self.fps * self.playback_speed)) if self.fps > 0 else 33
+            # Ensure minimum interval to prevent UI freezing
+            interval = max(10, interval)
+            self.play_timer.start(interval)
 
     def pause(self):
         """Pause video playback."""
@@ -344,4 +384,23 @@ class VideoPlayer(QWidget):
         self.load_frame(start_frame)
         
         # Signal
-        self.position_changed.emit(start_frame) 
+        self.position_changed.emit(start_frame)
+
+    def set_playback_speed(self, speed_text):
+        """Set the playback speed."""
+        try:
+            # Parse the speed value from the text (remove the 'x')
+            speed = float(speed_text.rstrip('x'))
+            self.playback_speed = speed
+            
+            # Update timer interval if playing
+            if self.is_playing_flag and self.play_timer.isActive():
+                self.play_timer.stop()
+                # Adjust timer interval based on speed
+                interval = int(1000 / (self.fps * self.playback_speed))
+                # Ensure we have at least 10ms interval to prevent UI freeze
+                interval = max(10, interval)
+                self.play_timer.start(interval)
+        except ValueError:
+            # If speed text couldn't be converted to float
+            pass 

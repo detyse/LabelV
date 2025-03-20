@@ -201,23 +201,25 @@ class LabelPanel(QWidget):
     @Slot()
     def on_remove_label(self):
         """Remove the selected label."""
-        if not self.current_label_id:
-            return
+        current_item = self.label_list.currentItem()
+        if current_item:
+            label_id = current_item.data(Qt.UserRole)
             
-        # Emit signal to remove label
-        self.label_deleted.emit(self.current_label_id)
-        
-        # Remove from list
-        for i in range(self.label_list.count()):
-            item = self.label_list.item(i)
-            if item.data(Qt.UserRole) == self.current_label_id:
-                self.label_list.takeItem(i)
-                break
-        
-        # Clear editor
-        self.current_label_id = None
-        self.set_editor_enabled(False)
-        self.remove_label_button.setEnabled(False)
+            # Remove from list
+            row = self.label_list.row(current_item)
+            self.label_list.takeItem(row)
+            
+            # Emit signal to remove from timeline
+            self.label_deleted.emit(label_id)
+            
+            # Clear the editor
+            self.clear_editor()
+            
+            # If there are still items in the list, select the previous one
+            # or the first one if we removed the first item
+            if self.label_list.count() > 0:
+                new_row = min(row, self.label_list.count() - 1)
+                self.label_list.setCurrentRow(new_row)
     
     @Slot()
     def on_label_property_changed(self):
@@ -288,11 +290,18 @@ class LabelPanel(QWidget):
     
     def add_label_to_list(self, label_data):
         """Add a label to the list widget."""
+        # Check if label already exists in the list
         label_id = label_data.get("id", "")
-        name = label_data.get("name", "")
-        color = label_data.get("color", [255, 165, 0, 180])  # Default to orange
+        for i in range(self.label_list.count()):
+            if self.label_list.item(i).data(Qt.UserRole) == label_id:
+                # Label already exists, just update it
+                self.update_list_item(i, label_data)
+                return
         
-        # Create list item
+        # Create new list item
+        name = label_data.get("name", "")
+        color = label_data.get("color", [255, 165, 0, 180])
+        
         item = QListWidgetItem(name)
         item.setData(Qt.UserRole, label_id)
         
@@ -311,9 +320,32 @@ class LabelPanel(QWidget):
         # Add to list
         self.label_list.addItem(item)
         
-        # Select new item if it's the only one
-        if self.label_list.count() == 1:
+        # Select the new item if no item is currently selected
+        if not self.label_list.currentItem():
             self.label_list.setCurrentItem(item)
+    
+    def update_list_item(self, row, label_data):
+        """Update an existing list item with new data."""
+        item = self.label_list.item(row)
+        if not item:
+            return
+        
+        name = label_data.get("name", "")
+        color = label_data.get("color", [255, 165, 0, 180])
+        
+        item.setText(name)
+        
+        # Update icon with new color
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.transparent)
+        
+        painter = QPainter(pixmap)
+        painter.setBrush(QBrush(QColor(*color)))
+        painter.setPen(Qt.black)
+        painter.drawRect(0, 0, 15, 15)
+        painter.end()
+        
+        item.setIcon(QIcon(pixmap))
     
     def update_label_data(self, label_data):
         """Update the editor with label data."""
@@ -391,4 +423,14 @@ class LabelPanel(QWidget):
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         secs = int(seconds % 60)
-        return f"{hours:02d}:{minutes:02d}:{secs:02d}" 
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+    def clear_editor(self):
+        """Clear the editor fields."""
+        self.current_label_id = None
+        self.name_edit.clear()
+        self.description_edit.clear()
+        self.color_button.setColor(QColor(255, 165, 0, 180))  # Reset to default color
+        self.start_frame_label.setText("0")
+        self.end_frame_label.setText("0")
+        self.set_editor_enabled(False) 
