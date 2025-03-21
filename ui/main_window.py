@@ -130,6 +130,12 @@ class MainWindow(QMainWindow):
         self.mode_action_edit.setShortcut(QKeySequence("X"))
         self.mode_action_edit.setCheckable(True)
         self.mode_action_edit.triggered.connect(lambda: self.timeline.set_mode(self.timeline.EDIT_MODE))
+        
+        # Add quality toggle action
+        self.quality_action = QAction("Toggle Fast Scrubbing", self)
+        self.quality_action.setCheckable(True)
+        self.quality_action.setChecked(True)  # Enable by default
+        self.quality_action.toggled.connect(self.toggle_scrubbing_quality)
     
     def create_toolbar(self):
         """Create application toolbar."""
@@ -146,6 +152,9 @@ class MainWindow(QMainWindow):
         # Add mode actions
         toolbar.addAction(self.mode_action_choose)
         toolbar.addAction(self.mode_action_edit)
+        
+        # Add quality toggle button
+        toolbar.addAction(self.quality_action)
     
     def update_mode(self, mode):
         """Update UI based on timeline mode."""
@@ -368,3 +377,11 @@ class MainWindow(QMainWindow):
     def update_template_selection(self, item):
         # Simply update the timeline without calling viewport()
         self.timeline.update() 
+
+    def toggle_scrubbing_quality(self, enabled):
+        """Toggle between fast and high-quality scrubbing."""
+        if hasattr(self.video_player, 'set_scrubbing_quality'):
+            self.video_player.set_scrubbing_quality("low" if enabled else "high")
+            
+            status = "Fast scrubbing enabled (lower quality during scrubbing)" if enabled else "High quality scrubbing enabled (may be slower)"
+            self.statusBar().showMessage(status, 3000) 

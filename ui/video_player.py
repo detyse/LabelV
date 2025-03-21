@@ -8,33 +8,67 @@ from pathlib import Path
 from collections import OrderedDict
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                              QSlider, QLabel, QSizePolicy, QComboBox)
+                              QSlider, QLabel, QSizePolicy, QComboBox, QGridLayout)
 from PySide6.QtCore import (Qt, Signal, Slot, QThread, QMutex, QMutexLocker, 
                            QSize, QTimer, QThreadPool, QRunnable)
 from PySide6.QtWidgets import QStyle
 from PySide6.QtGui import QImage, QPixmap, QIcon
 
 class FrameLoader(QRunnable):
-    """Runnable for loading frames in the background."""
+    """Worker to load frames in background."""
     
     def __init__(self, video_path, frame_idx, callback):
         super().__init__()
         self.video_path = video_path
         self.frame_idx = frame_idx
         self.callback = callback
+        self.quality_mode = "high"  # "high" or "low"
+        
+    def set_quality_mode(self, mode):
+        """Set the quality mode for frame loading."""
+        self.quality_mode = mode
         
     def run(self):
-        """Load the frame and call the callback with the result."""
-        cap = cv2.VideoCapture(self.video_path)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
-        ret, frame = cap.read()
-        cap.release()
+        """Load the frame in background."""
+        start_time = time.time()
         
-        if ret:
-            # Convert to RGB
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            self.callback(self.frame_idx, frame)
-        else:
+        try:
+            cap = cv2.VideoCapture(self.video_path)
+            
+            # For faster seeking, use these optimizations
+            cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
+            
+            # Set the position
+            cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
+            
+            # Read the frame
+            ret, frame = cap.read()
+            
+            # Clean up
+            cap.release()
+            
+            if ret:
+                # Convert to RGB
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                # If in low quality mode, downsample the image
+                if self.quality_mode == "low":
+                    h, w = frame.shape[:2]
+                    # Faster resize with NEAREST interpolation
+                    scale_factor = 2  # Higher value = lower quality but faster
+                    small_w, small_h = w//scale_factor, h//scale_factor
+                    frame = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
+                    frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_NEAREST)
+                
+                # Calculate load time
+                load_time = time.time() - start_time
+                
+                # Call callback with frame and load time
+                self.callback(self.frame_idx, frame, load_time)
+            else:
+                self.callback(self.frame_idx, None)
+        except Exception as e:
+            print(f"Error loading frame: {str(e)}")
             self.callback(self.frame_idx, None)
 
 
@@ -110,6 +144,26 @@ class VideoPlayer(QWidget):
         # Add mutex for thread safety
         self.display_mutex = QMutex()
         
+        # Add performance metrics
+        self.metrics = {
+            'load_time': 0,
+            'display_time': 0,
+            'total_time': 0,
+            'frames_processed': 0
+        }
+        
+        # Add a label to display metrics
+        self.metrics_label = QLabel("Frame metrics: N/A")
+        self.metrics_label.setStyleSheet("color: white; background-color: rgba(0,0,0,120); padding: 2px;")
+        self.metrics_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        
+        # Add scrubbing mode control
+        self.scrubbing_mode = "high"  # "high" or "low"
+        self.scrubbing_active = False
+        self.scrubbing_timer = QTimer()
+        self.scrubbing_timer.setSingleShot(True)
+        self.scrubbing_timer.timeout.connect(self.on_scrubbing_ended)
+        
         # Create UI
         self.setup_ui()
     
@@ -122,7 +176,14 @@ class VideoPlayer(QWidget):
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.video_label.setStyleSheet("background-color: black;")
-        layout.addWidget(self.video_label)
+        
+        # Create a grid layout for the video area to overlay metrics
+        self.video_layout = QGridLayout()
+        self.video_layout.addWidget(self.video_label, 0, 0, 1, 2)
+        self.video_layout.addWidget(self.metrics_label, 0, 1, 1, 1, Qt.AlignRight | Qt.AlignTop)
+        
+        # Add video layout to main layout
+        layout.addLayout(self.video_layout)
         
         # Controls layout
         controls_layout = QHBoxLayout()
@@ -221,7 +282,7 @@ class VideoPlayer(QWidget):
             return False
             
     def load_frame(self, frame_idx):
-        """Load a specific frame."""
+        """Load a specific frame with performance metrics."""
         if frame_idx < 0 or frame_idx >= self.frame_count:
             return
             
@@ -231,11 +292,18 @@ class VideoPlayer(QWidget):
             self.display_frame(cached_frame)
             return
             
+        # Start timing
+        start_time = time.time()
+        
         # Load in background
         task = FrameLoader(self.video_path, frame_idx, self.frame_loaded_callback)
+        task.set_quality_mode(self.scrubbing_mode)
         self.thread_pool.start(task)
+        
+        # Update metrics for loading request
+        self.metrics['frames_processed'] += 1
     
-    def frame_loaded_callback(self, frame_idx, frame):
+    def frame_loaded_callback(self, frame_idx, frame, load_time=None):
         """Callback when a frame is loaded."""
         if frame is None or self._is_closing:
             return
@@ -245,7 +313,21 @@ class VideoPlayer(QWidget):
         
         # If this is the current frame, display it
         if frame_idx == self.current_frame and not self._is_closing:
+            # Update load time metric if provided by the loader
+            if load_time is not None:
+                self.metrics['load_time'] = load_time
+            
+            # Display the frame and measure time
+            display_start = time.time()
             self.display_frame(frame)
+            display_time = time.time() - display_start
+            
+            # Update display time metric
+            self.metrics['display_time'] = display_time
+            self.metrics['total_time'] = load_time + display_time if load_time else display_time
+            
+            # Update metrics display
+            self.update_metrics_display()
     
     def display_frame(self, frame):
         """Display a frame in the UI."""
@@ -254,6 +336,9 @@ class VideoPlayer(QWidget):
             # Check if widget is still valid
             if self._is_closing:
                 return
+            
+            # Start timing
+            display_start = time.time()
             
             # Check if we are in a valid state to display the frame
             try:
@@ -267,14 +352,28 @@ class VideoPlayer(QWidget):
                 qimg = QImage(frame.data, w, h, frame.strides[0], QImage.Format_RGB888)
                 pixmap = QPixmap.fromImage(qimg)
                 
-                # Scale pixmap
-                scaled_pixmap = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                # Scale pixmap - use faster transformation when scrubbing
+                if self.scrubbing_active:
+                    scaled_pixmap = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.FastTransformation)
+                else:
+                    scaled_pixmap = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 
                 # Set pixmap to label
                 self.video_label.setPixmap(scaled_pixmap)
-            except (RuntimeError, AttributeError):
+                
+                # Calculate display time
+                display_time = time.time() - display_start
+                self.metrics['display_time'] = display_time
+                
+                # Update time label with current frame
+                self.update_time_label()
+                
+                # Update metrics display
+                self.update_metrics_display()
+                
+            except (RuntimeError, AttributeError) as e:
                 # Handle the case where the widget is in an invalid state
-                pass
+                print(f"Error displaying frame: {e}")
     
     @Slot()
     def toggle_play(self):
@@ -326,14 +425,26 @@ class VideoPlayer(QWidget):
             self.set_position(value)
     
     @Slot(int)
-    def set_position(self, position):
-        """Set the current frame position."""
-        if 0 <= position < self.frame_count and position != self.current_frame:
-            self.current_frame = position
-            self.seek_slider.setValue(position)
-            self.load_frame(position)
-            self.update_time_label()
-            self.position_changed.emit(position)
+    def set_position(self, frame):
+        """Set the current position to the given frame."""
+        if frame == self.current_frame:
+            return
+            
+        if not self.scrubbing_active:
+            self.scrubbing_active = True
+            self.scrubbing_mode = "low"  # Switch to low quality during scrubbing
+            
+        # Restart the timer - if no scrubbing for 500ms, switch back to high quality
+        self.scrubbing_timer.start(500)
+        
+        # Update current frame
+        self.current_frame = frame
+        
+        # Load the frame
+        self.load_frame(frame)
+        
+        # Emit position changed signal
+        self.position_changed.emit(frame)
     
     def update_time_label(self):
         """Update the time display label."""
@@ -427,4 +538,43 @@ class VideoPlayer(QWidget):
                 self.play_timer.start(interval)
         except ValueError:
             # If speed text couldn't be converted to float
-            pass 
+            pass
+
+    def update_metrics_display(self):
+        """Update the metrics display label."""
+        load_ms = self.metrics['load_time'] * 1000
+        display_ms = self.metrics['display_time'] * 1000
+        total_ms = (self.metrics['load_time'] + self.metrics['display_time']) * 1000
+        fps_approx = 1000 / total_ms if total_ms > 0 else 0
+        
+        metrics_text = (
+            f"Load: {load_ms:.1f}ms | "
+            f"Display: {display_ms:.1f}ms | "
+            f"Total: {total_ms:.1f}ms | "
+            f"~{fps_approx:.1f} FPS | "
+            f"Mode: {'Low' if self.scrubbing_mode == 'low' else 'High'}"
+        )
+        
+        # Make the text more visible with styling
+        self.metrics_label.setText(metrics_text)
+        self.metrics_label.setStyleSheet(
+            "color: white; background-color: rgba(0,0,0,150); "
+            "padding: 5px; border-radius: 3px; font-weight: bold;"
+        )
+
+    def on_scrubbing_ended(self):
+        """Called when scrubbing ends (timer expired)."""
+        self.scrubbing_active = False
+        self.scrubbing_mode = "high"
+        
+        # Reload current frame in high quality
+        self.load_frame(self.current_frame)
+
+    def set_scrubbing_quality(self, mode):
+        """Set the scrubbing quality mode."""
+        if mode in ["high", "low"]:
+            self.scrubbing_mode = mode
+            # Clear cache to ensure frames are reloaded with new quality
+            self.frame_cache.clear()
+            # Reload current frame with new quality
+            self.load_frame(self.current_frame) 
