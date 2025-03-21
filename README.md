@@ -86,3 +86,11 @@ Choose the appropriate speed from the dropdown in the video player controls.
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+
+## Additional
+
+For better video playback performance, you might also want to install platform-specific dependencies:
+
+For Windows:
+`pip install opencv-python-headless[ffmpeg]`
