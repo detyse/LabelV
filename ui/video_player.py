@@ -35,14 +35,27 @@ class FrameLoader(QRunnable):
         try:
             cap = cv2.VideoCapture(self.video_path)
             
-            # For faster seeking, use these optimizations
+            # For faster seeking, use hardware acceleration
             cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
             
-            # Set the position
-            cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
+            # Faster seeking to target frame using grab/retrieve approach
+            current_pos = 0
+            target_frame = self.frame_idx
             
-            # Read the frame
-            ret, frame = cap.read()
+            # If target is far away, use direct positioning first
+            if target_frame > 30:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+                current_pos = target_frame
+            
+            # Fine-tune position using grab() for precision
+            if current_pos < target_frame:
+                # Skip frames using grab() without decoding them
+                for _ in range(target_frame - current_pos):
+                    if not cap.grab():
+                        break
+            
+            # Now retrieve the frame (decode only the target frame)
+            ret, frame = cap.retrieve()
             
             # Clean up
             cap.release()
@@ -55,7 +68,7 @@ class FrameLoader(QRunnable):
                 if self.quality_mode == "low":
                     h, w = frame.shape[:2]
                     # Faster resize with NEAREST interpolation
-                    scale_factor = 2  # Higher value = lower quality but faster
+                    scale_factor = 3  # Higher value = lower quality but faster
                     small_w, small_h = w//scale_factor, h//scale_factor
                     frame = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
                     frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_NEAREST)
@@ -127,9 +140,13 @@ class VideoPlayer(QWidget):
         self.is_playing_flag = False
         
         # Frame cache
-        self.frame_cache = FrameCache(max_size=30)
+        self.frame_cache = FrameCache(max_size=60)  # Increase cache size
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(1)  # Limit to 1 background thread
+        
+        # Add separate thread pool for preloading with lower priority
+        self.preload_thread_pool = QThreadPool()
+        self.preload_thread_pool.setMaxThreadCount(1)
         
         # Playback timer
         self.play_timer = QTimer(self)
@@ -163,6 +180,9 @@ class VideoPlayer(QWidget):
         self.scrubbing_timer = QTimer()
         self.scrubbing_timer.setSingleShot(True)
         self.scrubbing_timer.timeout.connect(self.on_scrubbing_ended)
+        
+        # Pre-loading flag and behavior
+        self.preload_enabled = True
         
         # Create UI
         self.setup_ui()
@@ -225,6 +245,24 @@ class VideoPlayer(QWidget):
         # Add to controls layout
         controls_layout.addLayout(speed_layout)
         
+        # Add fast skip buttons (5 seconds forward/backward)
+        self.fast_backward_button = QPushButton("<<<")
+        self.fast_backward_button.setEnabled(False)
+        self.fast_backward_button.clicked.connect(self.fast_backward)
+        controls_layout.addWidget(self.fast_backward_button)
+        
+        self.fast_forward_button = QPushButton(">>>")
+        self.fast_forward_button.setEnabled(False)
+        self.fast_forward_button.clicked.connect(self.fast_forward)
+        controls_layout.addWidget(self.fast_forward_button)
+        
+        # Add metrics toggle button
+        self.metrics_button = QPushButton("Show Metrics")
+        self.metrics_button.setCheckable(True)
+        self.metrics_button.setChecked(True)
+        self.metrics_button.clicked.connect(self.toggle_metrics)
+        controls_layout.addWidget(self.metrics_button)
+        
         layout.addLayout(controls_layout)
         
         # Seek slider
@@ -247,6 +285,13 @@ class VideoPlayer(QWidget):
             self.fps = self.cap.get(cv2.CAP_PROP_FPS)
             self.duration_sec = self.frame_count / self.fps if self.fps > 0 else 0
             self.current_frame = 0
+            
+            # Set quality mode based on FPS
+            if self.fps < 25:
+                self.scrubbing_mode = "low"
+                print(f"Setting low quality mode by default (FPS: {self.fps})")
+            else:
+                self.scrubbing_mode = "high"
             
             # Update UI
             self.seek_slider.setRange(0, self.frame_count - 1)
@@ -275,6 +320,9 @@ class VideoPlayer(QWidget):
                 parent.timeline.set_fps(self.fps)
                 print(f"Set timeline FPS to {self.fps}")
             
+            self.fast_backward_button.setEnabled(True)
+            self.fast_forward_button.setEnabled(True)
+            
             return True
             
         except Exception as e:
@@ -290,6 +338,11 @@ class VideoPlayer(QWidget):
         cached_frame = self.frame_cache.get(frame_idx)
         if cached_frame is not None:
             self.display_frame(cached_frame)
+            
+            # Preload next frames if enabled and we're not scrubbing
+            if self.preload_enabled and not self.scrubbing_active:
+                self.preload_frames(frame_idx)
+            
             return
             
         # Start timing
@@ -404,13 +457,29 @@ class VideoPlayer(QWidget):
             else:
                 next_frame = self.current_frame + 1
             
-            self.set_position(next_frame)
+            # Update current frame
+            self.current_frame = next_frame
             
-            # Check if we've reached the end of playback range
-            if hasattr(self, 'playback_end_frame') and self.playback_end_frame is not None:
-                if self.current_frame >= self.playback_end_frame:
-                    self.pause()
-                    return
+            # Update UI without triggering another set_position call
+            self.seek_slider.blockSignals(True)
+            self.seek_slider.setValue(next_frame)
+            self.seek_slider.blockSignals(False)
+            
+            # Load the frame
+            self.load_frame(next_frame)
+            
+            # Emit position changed signal
+            self.position_changed.emit(next_frame)
+            
+            # If we're running at high speed, pre-compute several frames ahead
+            if self.playback_speed > 2.0:
+                for i in range(1, min(int(self.playback_speed * 2), 10)):
+                    future_frame = next_frame + i
+                    if future_frame < self.frame_count and self.frame_cache.get(future_frame) is None:
+                        # Queue pre-loading with low quality for speed
+                        preload_task = FrameLoader(self.video_path, future_frame, self.preload_callback)
+                        preload_task.set_quality_mode("low")  # Always use low quality for preloaded frames
+                        self.preload_thread_pool.start(preload_task)
     
     @Slot()
     def previous_frame(self):
@@ -430,6 +499,13 @@ class VideoPlayer(QWidget):
         if frame == self.current_frame:
             return
             
+        # Calculate jump size
+        jump_size = abs(frame - self.current_frame)
+        
+        # For large jumps, clear the cache to avoid keeping irrelevant frames
+        if jump_size > 30:
+            self.frame_cache.clear()
+        
         if not self.scrubbing_active:
             self.scrubbing_active = True
             self.scrubbing_mode = "low"  # Switch to low quality during scrubbing
@@ -577,4 +653,41 @@ class VideoPlayer(QWidget):
             # Clear cache to ensure frames are reloaded with new quality
             self.frame_cache.clear()
             # Reload current frame with new quality
-            self.load_frame(self.current_frame) 
+            self.load_frame(self.current_frame)
+
+    def preload_frames(self, current_idx):
+        """Preload a few future frames to improve playback smoothness."""
+        # If we're playing forward, preload next 3 frames
+        if self.playing:
+            for i in range(1, 4):
+                next_idx = current_idx + i
+                # Fixed comparison by checking if the key exists in cache
+                if isinstance(next_idx, (int, float)) and next_idx < self.frame_count and self.frame_cache.get(next_idx) is None:
+                    # Lower priority preload task
+                    task = FrameLoader(self.video_path, next_idx, self.preload_callback)
+                    task.set_quality_mode(self.scrubbing_mode)
+                    self.thread_pool.start(task)
+                    # Only queue one preload at a time to avoid overloading
+                    break
+
+    def preload_callback(self, frame_idx, frame, load_time=None):
+        """Callback for preloaded frames - just add to cache."""
+        if frame is not None and not self._is_closing:
+            self.frame_cache.put(frame_idx, frame)
+
+    def fast_forward(self):
+        """Skip forward 5 seconds."""
+        frames_to_skip = int(5 * self.fps)
+        new_frame = min(self.frame_count - 1, self.current_frame + frames_to_skip)
+        self.set_position(new_frame)
+
+    def fast_backward(self):
+        """Skip backward 5 seconds."""
+        frames_to_skip = int(5 * self.fps)
+        new_frame = max(0, self.current_frame - frames_to_skip)
+        self.set_position(new_frame)
+
+    def toggle_metrics(self, checked):
+        """Toggle display of performance metrics."""
+        self.metrics_label.setVisible(checked)
+        self.metrics_button.setText("Hide Metrics" if checked else "Show Metrics") 
