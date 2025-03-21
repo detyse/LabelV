@@ -896,39 +896,54 @@ class TimelineWidget(QWidget):
         
         # RIGHT MOUSE BUTTON RELEASE
         elif event.button() == Qt.RightButton:
-            # Check if we were creating a label
-            if self.state == self.CREATING_LABEL and self.current_mode == self.EDIT_MODE:
-                # Create a new label only if dragged enough
-                start_frame = min(self.mouse_down_frame, release_frame)
-                end_frame = max(self.mouse_down_frame, release_frame)
+            if self.state == self.CREATING_LABEL:
+                # Get the frame range for the new label
+                start_frame = min(self.mouse_down_frame, self.current_frame)
+                end_frame = max(self.mouse_down_frame, self.current_frame)
                 
-                # Only create if it spans at least 1 frame
-                if end_frame > start_frame:
-                    # Get the next number
-                    next_number = len(self.labels) + 1
+                # Get the selected template name from the label panel
+                template_name = "New Label"
+                parent = self.parent()
+                while parent:
+                    if hasattr(parent, 'label_panel'):
+                        template_name = parent.label_panel.selected_template
+                        break
+                    parent = parent.parent()
                     
-                    # Create label with format: "1. grooming"
-                    label = Label(
-                        name=f"{next_number}. New Label",
-                        category="default",
-                        start_frame=start_frame,
-                        end_frame=end_frame
-                    )
-                    
-                    self.labels.append(label)
-                    
-                    # Assign to a track immediately
-                    self.assign_labels_to_tracks()
-                    
-                    # Select the new label
-                    self.selected_label_idx = len(self.labels) - 1
-                    label.selected = True
-                    
-                    # Emit signals
-                    self.label_selected.emit(label.id)
-                    
-                    # Also emit the created signal with label data
-                    self.label_created.emit(label.to_dict())
+                # Create base name from template
+                base_name = template_name.split(". ", 1)[-1] if ". " in template_name else template_name
+                
+                # Get the next number based on existing labels
+                existing_numbers = []
+                for lbl in self.labels:
+                    name_parts = lbl.name.split(". ", 1)
+                    if len(name_parts) > 0 and name_parts[0].isdigit():
+                        try:
+                            existing_numbers.append(int(name_parts[0]))
+                        except ValueError:
+                            pass
+                
+                next_number = max(existing_numbers) + 1 if existing_numbers else 1
+                
+                # Create label with formatted name
+                label = Label(
+                    name=f"{next_number}. {base_name}",
+                    category="default",
+                    start_frame=start_frame,
+                    end_frame=end_frame
+                )
+                
+                # Add to labels list
+                self.labels.append(label)
+                
+                # Select the new label
+                self.select_label_by_id(label.id)
+                
+                # Emit signal with label data
+                self.label_created.emit(label.to_dict())
+                
+                # Update the display
+                self.update()
         
         # Reset cursor to appropriate default for mode
         if self.current_mode == self.EDIT_MODE:
@@ -1171,3 +1186,14 @@ class TimelineWidget(QWidget):
         self.debug_mode = not self.debug_mode
         print(f"Debug mode: {'ON' if self.debug_mode else 'OFF'}")
         self.update()
+
+    @Slot(str, str)
+    def update_label_name(self, label_id, new_name):
+        """Update the name of a label on the timeline."""
+        # Find the label with the given ID and update its name
+        for i, label in enumerate(self.labels):
+            if label.id == label_id:
+                self.labels[i].name = new_name
+                # Force a repaint of the timeline
+                self.update()
+                break

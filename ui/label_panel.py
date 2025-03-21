@@ -5,7 +5,8 @@ import uuid
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                               QLabel, QLineEdit, QListWidget, QListWidgetItem,
                               QColorDialog, QComboBox, QTextEdit, QFormLayout,
-                              QGroupBox, QSplitter, QFrame, QMenu, QPlainTextEdit)
+                              QGroupBox, QSplitter, QFrame, QMenu, QPlainTextEdit,
+                              QAbstractItemView)
 from PySide6.QtCore import Qt, Signal, Slot, QSize
 from PySide6.QtGui import QColor, QIcon, QPixmap, QBrush, QPainter
 
@@ -61,6 +62,7 @@ class LabelPanel(QWidget):
     label_deleted = Signal(str)  # Label ID
     label_updated = Signal(dict)  # Updated label data
     label_selected = Signal(str)  # Label ID
+    label_name_changed = Signal(str, str)  # old_id, new_name
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -132,6 +134,34 @@ class LabelPanel(QWidget):
         
         # Disable editor initially
         self.set_editor_enabled(False)
+        
+        # Add label templates section
+        templates_group = QGroupBox("Label Templates")
+        templates_layout = QVBoxLayout(templates_group)
+        
+        # Label list widget
+        self.label_template_list = QListWidget()
+        self.label_template_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.label_template_list.itemClicked.connect(self.on_template_selected)
+        templates_layout.addWidget(self.label_template_list)
+        
+        # Add template button at the bottom
+        templates_button_layout = QHBoxLayout()
+        self.add_template_button = QPushButton("Add Current")
+        self.add_template_button.clicked.connect(self.add_current_to_templates)
+        self.clear_template_button = QPushButton("Clear Selection")
+        self.clear_template_button.clicked.connect(self.clear_template_selection)
+        templates_button_layout.addWidget(self.add_template_button)
+        templates_button_layout.addWidget(self.clear_template_button)
+        templates_layout.addLayout(templates_button_layout)
+        
+        # Add the templates group to the main layout
+        layout.addWidget(templates_group)
+        
+        # Initialize with "New Label"
+        self.selected_template = "New Label"
+        self.label_template_list.addItem("New Label")
+        self.label_template_list.setCurrentRow(0)
     
     def set_editor_enabled(self, enabled):
         """Enable or disable the label editor."""
@@ -247,6 +277,9 @@ class LabelPanel(QWidget):
         
         # Emit signal to update label
         self.label_updated.emit(label_data)
+        
+        # Add this line after updating the label in your data structure
+        self.label_name_changed.emit(self.current_label_id, full_name)
     
     @Slot(QListWidgetItem, QListWidgetItem)
     def on_label_selected(self, current, previous):
@@ -270,6 +303,11 @@ class LabelPanel(QWidget):
     
     def add_label_to_list(self, label_data):
         """Add a label to the list widget."""
+        # Update the name format when adding new labels
+        if label_data["name"].startswith("Label ") or label_data["name"] == "New Label":
+            # Apply template naming
+            label_data["name"] = self.selected_template
+        
         # Check if label already exists in the list
         label_id = label_data.get("id", "")
         for i in range(self.label_list.count()):
@@ -414,3 +452,43 @@ class LabelPanel(QWidget):
         self.start_frame_label.setText("0")
         self.end_frame_label.setText("0")
         self.set_editor_enabled(False) 
+
+    def on_template_selected(self, item):
+        """Handle template selection."""
+        self.selected_template = item.text()
+        
+        # Automatically update the name field when a template is selected
+        if self.current_label_id is None:  # Only when creating new labels
+            self.name_edit.setText(self.selected_template)
+
+    def add_current_to_templates(self):
+        """Add the current label name to templates."""
+        current_name = self.name_edit.text().strip()
+        if not current_name:
+            return
+        
+        # Check if already exists
+        items = [self.label_template_list.item(i).text() 
+                 for i in range(self.label_template_list.count())]
+        
+        if current_name not in items:
+            self.label_template_list.addItem(current_name)
+        
+    def clear_template_selection(self):
+        """Clear the current template selection."""
+        self.label_template_list.clearSelection()
+        self.selected_template = "New Label"
+        
+    def create_new_label(self):
+        """Create a new label."""
+        # Modify your existing method to use the selected template
+        # if no name is provided
+        
+        # Assuming you have a name_edit field for the label name
+        name = self.name_edit.text().strip()
+        if not name:
+            name = self.selected_template
+            self.name_edit.setText(name)
+        
+        # Rest of your existing label creation code
+        # ... 

@@ -104,6 +104,12 @@ class VideoPlayer(QWidget):
         # Playback speed
         self.playback_speed = 1.0
         
+        # Add a flag to track if the widget is being closed
+        self._is_closing = False
+        
+        # Add mutex for thread safety
+        self.display_mutex = QMutex()
+        
         # Create UI
         self.setup_ui()
     
@@ -231,33 +237,44 @@ class VideoPlayer(QWidget):
     
     def frame_loaded_callback(self, frame_idx, frame):
         """Callback when a frame is loaded."""
-        if frame is None:
+        if frame is None or self._is_closing:
             return
             
         # Add to cache
         self.frame_cache.put(frame_idx, frame)
         
         # If this is the current frame, display it
-        if frame_idx == self.current_frame:
+        if frame_idx == self.current_frame and not self._is_closing:
             self.display_frame(frame)
     
     def display_frame(self, frame):
         """Display a frame in the UI."""
-        h, w, _ = frame.shape
-        
-        # Scale the frame to fit the label while maintaining aspect ratio
-        label_size = self.video_label.size()
-        target_size = QSize(label_size.width(), label_size.height())
-        
-        # Convert to QImage
-        qimg = QImage(frame.data, w, h, frame.strides[0], QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimg)
-        
-        # Scale pixmap
-        scaled_pixmap = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        
-        # Set pixmap to label
-        self.video_label.setPixmap(scaled_pixmap)
+        # Use mutex to protect this function from concurrent access
+        with QMutexLocker(self.display_mutex):
+            # Check if widget is still valid
+            if self._is_closing:
+                return
+            
+            # Check if we are in a valid state to display the frame
+            try:
+                h, w, _ = frame.shape
+                
+                # Scale the frame to fit the label while maintaining aspect ratio
+                label_size = self.video_label.size()
+                target_size = QSize(label_size.width(), label_size.height())
+                
+                # Convert to QImage
+                qimg = QImage(frame.data, w, h, frame.strides[0], QImage.Format_RGB888)
+                pixmap = QPixmap.fromImage(qimg)
+                
+                # Scale pixmap
+                scaled_pixmap = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                
+                # Set pixmap to label
+                self.video_label.setPixmap(scaled_pixmap)
+            except (RuntimeError, AttributeError):
+                # Handle the case where the widget is in an invalid state
+                pass
     
     @Slot()
     def toggle_play(self):
@@ -337,6 +354,13 @@ class VideoPlayer(QWidget):
     
     def closeEvent(self, event):
         """Handle close event."""
+        # Set the closing flag
+        self._is_closing = True
+        
+        # Wait for any pending frame loaders to finish
+        self.thread_pool.clear()  # Cancel pending tasks
+        self.thread_pool.waitForDone(1000)  # Wait up to a second
+        
         if self.cap:
             self.cap.release()
         event.accept()

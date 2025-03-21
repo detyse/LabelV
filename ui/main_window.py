@@ -73,6 +73,14 @@ class MainWindow(QMainWindow):
         # Connect signals for timeline-label panel synchronization
         self.timeline.label_created.connect(self.on_label_created)
         
+        # Connect label name change signal to timeline
+        self.label_panel.label_name_changed.connect(self.timeline.update_label_name)
+        
+        # Add this connection
+        self.label_panel.label_template_list.itemClicked.connect(
+            self.update_template_selection
+        )
+        
         # Create toolbar and actions
         self.create_actions()
         self.create_toolbar()
@@ -356,3 +364,7 @@ class MainWindow(QMainWindow):
         
         # Pass event to standard event processing
         return super().eventFilter(obj, event) 
+
+    def update_template_selection(self, item):
+        # Simply update the timeline without calling viewport()
+        self.timeline.update() 
