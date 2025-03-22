@@ -233,91 +233,104 @@ class TimelineWidget(QWidget):
     
     def draw_time_markers(self, painter, rect):
         """Draw time markers on the timeline."""
-        if self.frame_count == 0:
+        if self.frame_count <= 0 or self.fps <= 0:
             return
+        
+        total_seconds = self.frame_count / self.fps if self.fps > 0 else 0
+        
+        # Safety check - if total_seconds is unreasonably large, cap it
+        if total_seconds > 86400:  # Cap at 24 hours to prevent UI issues
+            print(f"Warning: Capping timeline display to 24 hours (actual duration: {total_seconds:.1f}s)")
+            total_seconds = 86400
+        
+        # Determine appropriate intervals based on zoom level and total duration
+        if total_seconds < 10:
+            # For very short videos, show tenths of seconds
+            major_interval = 1  # Every second
+            minor_interval = 0.1  # Every 0.1 seconds
+        elif total_seconds < 60:
+            # For short videos, show all seconds
+            major_interval = 10  # Every 10 seconds
+            minor_interval = 1  # Every second
+        elif total_seconds < 300:
+            # For videos under 5 minutes
+            major_interval = 30  # Every 30 seconds
+            minor_interval = 5  # Every 5 seconds
+        elif total_seconds < 900:
+            # For videos under 15 minutes
+            major_interval = 60  # Every minute
+            minor_interval = 10  # Every 10 seconds
+        elif total_seconds < 3600:
+            # For videos under an hour
+            major_interval = 300  # Every 5 minutes
+            minor_interval = 60  # Every minute
+        else:
+            # For longer videos
+            major_interval = 600  # Every 10 minutes
+            minor_interval = 60  # Every minute
+        
+        # Use manual iteration instead of np.arange to avoid potential memory issues
+        start_second_major = 0
+        end_second_major = min(total_seconds, 86400)  # Cap at 24 hours
+        
+        start_second_minor = 0
+        end_second_minor = min(total_seconds, 86400)  # Cap at 24 hours
+        
+        # Draw major time markers
+        painter.setPen(QPen(QColor(200, 200, 200), 1))
+        
+        # Use manual iteration with a reasonable step
+        current_second = start_second_major
+        while current_second <= end_second_major:
+            # Calculate position
+            frame = int(current_second * self.fps)
+            position = self.get_position_for_frame(frame)
             
-        width = rect.width()
-        
-        # Determine appropriate marker interval based on zoom
-        visible_frames = self.frame_count / self.zoom_level
-        frame_per_pixel = visible_frames / width
-        
-        # Calculate appropriate interval (aim for markers roughly every 100 pixels)
-        intervals = [1, 5, 10, 30, 60, 300, 600, 1800, 3600, 7200, 18000, 36000]
-        
-        # Use the instance FPS instead of hardcoded value
-        fps = self.fps
-        
-        # Convert frames to seconds for marker intervals
-        seconds_per_pixel = frame_per_pixel / fps
-        interval_seconds = 1
-        
-        for interval in intervals:
-            if interval / seconds_per_pixel >= 100:
-                interval_seconds = interval
-                break
-        
-        # Draw background grid lines (minor ticks)
-        painter.setPen(QPen(QColor(70, 70, 70), 1, Qt.DotLine))
-        minor_interval = interval_seconds / 5  # Smaller ticks in between major ones
-        
-        start_second_minor = math.floor(self.offset / fps / minor_interval) * minor_interval
-        end_second_minor = math.ceil((self.offset + visible_frames) / fps / minor_interval) * minor_interval
-        
-        for second in np.arange(start_second_minor, end_second_minor + minor_interval, minor_interval):
-            frame = int(second * fps)
-            x_pos = self.get_position_for_frame(frame)
+            # Draw line
+            painter.drawLine(QPointF(position, rect.top()), 
+                            QPointF(position, rect.top() + rect.height() * 0.5))
             
-            if 0 <= x_pos <= width:
-                # Draw minor tick line (shorter)
-                painter.drawLine(QPointF(x_pos, rect.bottom() - self.time_marker_height / 3), 
-                                QPointF(x_pos, rect.bottom()))
-        
-        # Draw main markers
-        painter.setPen(QColor(180, 180, 180))
-        font = QFont()
-        font.setPointSize(8)
-        painter.setFont(font)
-        
-        # Start from the first visible marker
-        start_second = math.floor(self.offset / fps / interval_seconds) * interval_seconds
-        end_second = math.ceil((self.offset + visible_frames) / fps / interval_seconds) * interval_seconds
-        
-        for second in np.arange(start_second, end_second + interval_seconds, interval_seconds):
-            frame = int(second * fps)
-            x_pos = self.get_position_for_frame(frame)
+            # Format time as MM:SS or HH:MM:SS
+            if current_second < 3600:
+                minutes = int(current_second // 60)
+                seconds = int(current_second % 60)
+                time_text = f"{minutes:02d}:{seconds:02d}"
+            else:
+                hours = int(current_second // 3600)
+                minutes = int((current_second % 3600) // 60)
+                seconds = int(current_second % 60)
+                time_text = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             
-            if 0 <= x_pos <= width:
-                # Draw marker line
-                painter.setPen(QPen(QColor(120, 120, 120), 1))
-                painter.drawLine(QPointF(x_pos, rect.top()), 
-                                QPointF(x_pos, rect.bottom()))
-                
-                painter.setPen(QColor(200, 200, 200))
-                
-                # Format time
-                minutes, seconds = divmod(second, 60)
-                hours, minutes = divmod(minutes, 60)
-                
-                if hours > 0:
-                    time_text = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                else:
-                    time_text = f"{minutes:02d}:{seconds:02d}"
-                
-                # Draw time text
-                time_rect = QRectF(x_pos - 50, rect.bottom() - self.time_marker_height - 15, 100, 15)
-                painter.drawText(time_rect, Qt.AlignCenter, time_text)
-                
-                # Draw frame number below (smaller)
-                small_font = QFont()
-                small_font.setPointSize(7)
-                painter.setFont(small_font)
-                
-                frame_rect = QRectF(x_pos - 50, rect.bottom() - 12, 100, 12)
-                painter.setPen(QColor(150, 150, 150))
-                painter.drawText(frame_rect, Qt.AlignCenter, f"Frame: {frame}")
-                
-                painter.setFont(font)  # Restore original font
+            # Draw text
+            painter.drawText(
+                QRectF(position - 50, rect.top() + rect.height() * 0.5, 100, rect.height() * 0.5),
+                Qt.AlignCenter, time_text
+            )
+            
+            # Move to next major marker
+            current_second += major_interval
+        
+        # Draw minor time markers (lighter)
+        painter.setPen(QPen(QColor(150, 150, 150, 100), 1))
+        
+        # Use manual iteration for minor markers too
+        current_second = start_second_minor
+        while current_second <= end_second_minor:
+            # Skip if this is already a major marker
+            if current_second % major_interval == 0:
+                current_second += minor_interval
+                continue
+            
+            # Calculate position
+            frame = int(current_second * self.fps)
+            position = self.get_position_for_frame(frame)
+            
+            # Draw minor tick
+            painter.drawLine(QPointF(position, rect.top()), 
+                             QPointF(position, rect.top() + rect.height() * 0.25))
+            
+            # Move to next minor marker
+            current_second += minor_interval
     
     def draw_labels(self, painter, rect):
         """Draw label tracks and labels."""
