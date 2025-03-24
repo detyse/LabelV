@@ -131,11 +131,10 @@ class MainWindow(QMainWindow):
         self.mode_action_edit.setCheckable(True)
         self.mode_action_edit.triggered.connect(lambda: self.timeline.set_mode(self.timeline.EDIT_MODE))
         
-        # Add quality toggle action
-        self.quality_action = QAction("Toggle Fast Scrubbing", self)
-        self.quality_action.setCheckable(True)
-        self.quality_action.setChecked(True)  # Enable by default
-        self.quality_action.toggled.connect(self.toggle_scrubbing_quality)
+        # Update the quality action to indicate permanent low quality mode
+        self.quality_action = QAction("Fast Mode Always Enabled (For Best Performance)", self)
+        self.quality_action.setCheckable(False)
+        self.quality_action.setEnabled(False)  # Disable the action
     
     def create_toolbar(self):
         """Create application toolbar."""
@@ -332,11 +331,29 @@ class MainWindow(QMainWindow):
 
     def play_label_segment(self, start_frame, end_frame):
         """Play a specific video segment from start to end frame."""
+        # Ensure video player is properly set to low quality mode before playback
+        if hasattr(self.video_player, 'set_scrubbing_quality'):
+            self.video_player.set_scrubbing_quality("low")
+        
+        # Force the video player's scrubbing mode directly to ensure it takes effect
+        self.video_player.scrubbing_mode = "low"
+        
+        # Reset any active scrubbing state that might interfere with playback
+        self.video_player.scrubbing_active = False
+        
         # Set playback range
         self.video_player.set_playback_range(start_frame, end_frame)
         
+        # Make sure playback speed is properly applied
+        current_speed = self.video_player.playback_speed
+        if current_speed < 0.5:  # If speed is too slow, reset it
+            self.video_player.set_playback_speed("1.0x")
+        
         # Start playback
         self.video_player.play()
+        
+        # Update status bar to confirm low quality mode
+        self.statusBar().showMessage("Playing segment in fast mode", 2000)
 
     def on_label_created(self, label_data):
         """Handle when a label is created in the timeline."""
@@ -381,7 +398,8 @@ class MainWindow(QMainWindow):
     def toggle_scrubbing_quality(self, enabled):
         """Toggle between fast and high-quality scrubbing."""
         if hasattr(self.video_player, 'set_scrubbing_quality'):
-            self.video_player.set_scrubbing_quality("low" if enabled else "high")
+            # Always use low quality
+            self.video_player.set_scrubbing_quality("low")
             
-            status = "Fast scrubbing enabled (lower quality during scrubbing)" if enabled else "High quality scrubbing enabled (may be slower)"
-            self.statusBar().showMessage(status, 3000) 
+            # Update status to inform user
+            self.statusBar().showMessage("Fast scrubbing permanently enabled for best performance", 3000) 

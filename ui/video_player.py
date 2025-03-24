@@ -157,11 +157,12 @@ class FrameLoader(QRunnable):
         self.video_path = video_path
         self.frame_idx = frame_idx
         self.callback = callback
-        self.quality_mode = "high"  # "high" or "low"
+        self.quality_mode = "low"  # Always use low quality mode for better performance
         
     def set_quality_mode(self, mode):
         """Set the quality mode for frame loading."""
-        self.quality_mode = mode
+        # Always maintain low quality mode regardless of requested mode
+        self.quality_mode = "low"
         
     def run(self):
         """Load the frame in background."""
@@ -586,7 +587,10 @@ class VideoPlayer(QWidget):
         self.playing = False
         self.is_playing_flag = False
         
-        # Use low quality by default for faster loading
+        # Add quality lock to prevent any mode changes
+        self.quality_lock = True  # New property
+        
+        # Always use low quality for better performance
         self.scrubbing_mode = "low"  
         
         # Frame cache
@@ -840,6 +844,9 @@ class VideoPlayer(QWidget):
         if frame_idx < 0 or frame_idx >= self.frame_count:
             return
         
+        # Always force low quality mode for better performance
+        self.scrubbing_mode = "low"
+        
         # Check if frame is in cache
         cached_frame = self.frame_cache.get(frame_idx)
         if cached_frame is not None:
@@ -1071,20 +1078,100 @@ class VideoPlayer(QWidget):
 
     def play(self):
         """Start video playback."""
-        if not self.cap or not self.cap.isOpened():
+        if not hasattr(self, 'video_reader') or self.video_reader is None:
             return
         
+        # Always force low quality mode during playback for better performance
+        self.scrubbing_mode = "low"
+        
+        # Set playback state
         self.playing = True
         self.is_playing_flag = True
         self.play_button.setText("Pause")
         self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
         
+        # Add frame processing time tracking
+        self.last_frame_time = time.time()
+        self.consecutive_late_frames = 0
+        
         # Start playback timer if not running
         if not self.play_timer.isActive():
+            # Double-check that playback speed is reasonable
+            if self.playback_speed <= 0:
+                self.playback_speed = 1.0
+            
             # Calculate interval based on FPS and playback speed
             interval = int(1000 / (self.fps * self.playback_speed)) if self.fps > 0 else 33
+            
             # Ensure minimum interval to prevent UI freezing
             interval = max(10, interval)
+            
+            # Log the playback settings for debugging
+            self.logger.info(f"Starting playback: speed={self.playback_speed}, interval={interval}ms, quality={self.scrubbing_mode}")
+            
+            # Create modified next_frame function with adaptive timing
+            def adaptive_next_frame():
+                now = time.time()
+                elapsed = now - self.last_frame_time
+                target_interval = 1.0/(self.fps * self.playback_speed) if self.fps > 0 else 0.033
+                
+                # Check if we're running behind schedule
+                if elapsed > target_interval * 1.5:
+                    # Calculate how many frames to skip to catch up
+                    skip_count = int(elapsed // target_interval)
+                    
+                    # Limit maximum skip to avoid huge jumps
+                    skip_count = min(skip_count, 5)
+                    
+                    # If playing through a label segment, ensure we don't exceed the end frame
+                    if hasattr(self, 'playback_end_frame'):
+                        next_frame = min(self.current_frame + skip_count, self.playback_end_frame)
+                    else:
+                        next_frame = min(self.current_frame + skip_count, self.frame_count - 1)
+                    
+                    # Update consecutive late frames counter
+                    self.consecutive_late_frames += 1
+                    
+                    # Log the skip
+                    if skip_count > 1:
+                        self.logger.info(f"Adaptive playback skipping {skip_count} frames to maintain performance")
+                    
+                    # If consistently behind, reduce effective playback speed
+                    if self.consecutive_late_frames > 5:
+                        self.logger.info("Excessive frame skipping detected, reducing effective playback speed")
+                        # Just slow down the timer interval without changing displayed speed
+                        new_interval = self.play_timer.interval() * 1.2
+                        self.play_timer.setInterval(int(new_interval))
+                        # Reset counter after adjustment
+                        self.consecutive_late_frames = 0
+                else:
+                    # Running on schedule, reset counter
+                    self.consecutive_late_frames = 0
+                    next_frame = self.current_frame + 1
+                
+                # Update current frame and move to next
+                if next_frame != self.current_frame and next_frame < self.frame_count:
+                    self.current_frame = next_frame
+                    
+                    # Update UI without triggering another set_position call
+                    self.seek_slider.blockSignals(True)
+                    self.seek_slider.setValue(next_frame)
+                    self.seek_slider.blockSignals(False)
+                    
+                    # Load the frame
+                    self.load_frame(next_frame)
+                    
+                    # Emit position changed signal
+                    self.position_changed.emit(next_frame)
+                
+                # Record time after processing frame for next calculation
+                self.last_frame_time = time.time()
+            
+            # Disconnect default handler and connect our adaptive handler
+            self.play_timer.timeout.disconnect(self.next_frame)
+            self.play_timer.timeout.connect(adaptive_next_frame)
+            
+            # Start the timer
             self.play_timer.start(interval)
 
     def pause(self):
@@ -1102,6 +1189,9 @@ class VideoPlayer(QWidget):
 
     def set_playback_range(self, start_frame, end_frame):
         """Set a range of frames to play."""
+        # Always ensure we're in low quality mode for smooth playback
+        self.scrubbing_mode = "low"
+        
         self.playback_start_frame = start_frame
         self.playback_end_frame = end_frame
         self.current_frame = start_frame
@@ -1158,25 +1248,33 @@ class VideoPlayer(QWidget):
     def on_scrubbing_ended(self):
         """Called when scrubbing ends (timer expired)."""
         self.scrubbing_active = False
-        self.scrubbing_mode = "high"
+        # Always keep low quality mode even after scrubbing ends
+        self.scrubbing_mode = "low"
         
-        # Reload current frame in high quality
-        self.load_frame(self.current_frame)
+        # No need to reload the current frame in high quality
+        # Just keep the current frame as is
 
     def set_scrubbing_quality(self, mode):
-        """Set the scrubbing quality mode."""
-        if mode in ["high", "low"]:
-            self.scrubbing_mode = mode
-            # Clear cache to ensure frames are reloaded with new quality
-            self.frame_cache.clear()
-            # Reload current frame with new quality
-            self.load_frame(self.current_frame)
+        """Set scrubbing quality mode - always uses low quality for better performance."""
+        # Force low quality mode for better performance
+        actual_mode = "low"
+        
+        # Update log for debugging purposes
+        self.logger.info(f"Scrubbing quality requested: {mode}, but using: {actual_mode}")
+        
+        # If we have a thread pool, update all workers
+        if hasattr(self, 'thread_pool') and self.thread_pool:
+            # This implementation depends on how workers are managed
+            pass  # Any worker-updating code would go here
 
     def preload_frames(self, current_idx):
         """Preload frames to improve playback smoothness."""
         # Don't preload during scrubbing
         if self.scrubbing_active:
             return
+        
+        # Always ensure scrubbing_mode is low for preloading
+        self.scrubbing_mode = "low"
         
         # Calculate frames to preload
         if self.playing:
@@ -1206,9 +1304,9 @@ class VideoPlayer(QWidget):
                         # Load frame and add to cache
                         frame = self.video_reader.get_frame(idx)
                         
-                        # Apply low quality for preloaded frames
+                        # Apply low quality for preloaded frames - STANDARDIZE TO SCALE FACTOR 3
                         h, w = frame.shape[:2]
-                        scale_factor = 4  # Even lower quality for preloaded frames
+                        scale_factor = 3  # Use consistent scale factor of 3 throughout
                         small_w, small_h = w//scale_factor, h//scale_factor
                         frame = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
                         frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_NEAREST)
