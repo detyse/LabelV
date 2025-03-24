@@ -865,6 +865,9 @@ class VideoPlayer(QWidget):
             # Get frame from MediaVideo reader
             frame = self.video_reader.get_frame(frame_idx)
             
+            # Convert BGR to RGB if needed
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
             # Apply quality reduction for scrubbing if needed
             if self.scrubbing_mode == "low":
                 h, w = frame.shape[:2]
@@ -1109,7 +1112,7 @@ class VideoPlayer(QWidget):
             # Log the playback settings for debugging
             self.logger.info(f"Starting playback: speed={self.playback_speed}, interval={interval}ms, quality={self.scrubbing_mode}")
             
-            # Create modified next_frame function with adaptive timing
+            # Create modified next_frame function with adaptive timing and segment handling
             def adaptive_next_frame():
                 now = time.time()
                 elapsed = now - self.last_frame_time
@@ -1123,34 +1126,50 @@ class VideoPlayer(QWidget):
                     # Limit maximum skip to avoid huge jumps
                     skip_count = min(skip_count, 5)
                     
-                    # If playing through a label segment, ensure we don't exceed the end frame
-                    if hasattr(self, 'playback_end_frame'):
-                        next_frame = min(self.current_frame + skip_count, self.playback_end_frame)
-                    else:
-                        next_frame = min(self.current_frame + skip_count, self.frame_count - 1)
+                    # Calculate next frame with skip
+                    next_frame = self.current_frame + skip_count
                     
                     # Update consecutive late frames counter
                     self.consecutive_late_frames += 1
                     
-                    # Log the skip
-                    if skip_count > 1:
-                        self.logger.info(f"Adaptive playback skipping {skip_count} frames to maintain performance")
-                    
                     # If consistently behind, reduce effective playback speed
                     if self.consecutive_late_frames > 5:
-                        self.logger.info("Excessive frame skipping detected, reducing effective playback speed")
-                        # Just slow down the timer interval without changing displayed speed
+                        self.logger.warning("Performance issue: Reducing playback timer interval")
                         new_interval = self.play_timer.interval() * 1.2
                         self.play_timer.setInterval(int(new_interval))
-                        # Reset counter after adjustment
                         self.consecutive_late_frames = 0
                 else:
                     # Running on schedule, reset counter
                     self.consecutive_late_frames = 0
                     next_frame = self.current_frame + 1
                 
-                # Update current frame and move to next
-                if next_frame != self.current_frame and next_frame < self.frame_count:
+                # Check for segment end condition - FIXED to handle None values safely
+                playing_segment = hasattr(self, 'playback_end_frame') and self.playback_end_frame is not None
+                
+                if playing_segment and next_frame >= self.playback_end_frame:
+                    # We've reached the end of the segment
+                    self.pause()
+                    # Make sure we display the exact end frame
+                    next_frame = self.playback_end_frame
+                    
+                    # Log segment completion
+                    self.logger.info(f"Completed segment playback from {self.playback_start_frame} to {self.playback_end_frame}")
+                    
+                    # Clear playback range settings
+                    self.playback_start_frame = None
+                    self.playback_end_frame = None
+                    
+                    # IMPORTANT: Stop the timer to prevent further callbacks
+                    if self.play_timer.isActive():
+                        self.play_timer.stop()
+                    
+                    return
+                
+                # Otherwise, stay within normal bounds
+                next_frame = min(next_frame, self.frame_count - 1)
+                
+                # Update current frame only if it changed
+                if next_frame != self.current_frame:
                     self.current_frame = next_frame
                     
                     # Update UI without triggering another set_position call
@@ -1158,7 +1177,8 @@ class VideoPlayer(QWidget):
                     self.seek_slider.setValue(next_frame)
                     self.seek_slider.blockSignals(False)
                     
-                    # Load the frame
+                    # Load the frame (force to low quality for segment playback)
+                    self.scrubbing_mode = "low"
                     self.load_frame(next_frame)
                     
                     # Emit position changed signal
@@ -1167,8 +1187,14 @@ class VideoPlayer(QWidget):
                 # Record time after processing frame for next calculation
                 self.last_frame_time = time.time()
             
-            # Disconnect default handler and connect our adaptive handler
-            self.play_timer.timeout.disconnect(self.next_frame)
+            # Properly disconnect any existing connections first
+            try:
+                self.play_timer.timeout.disconnect()
+            except RuntimeError:
+                # It's okay if there was no connection
+                pass
+            
+            # Connect our adaptive handler
             self.play_timer.timeout.connect(adaptive_next_frame)
             
             # Start the timer
@@ -1304,7 +1330,10 @@ class VideoPlayer(QWidget):
                         # Load frame and add to cache
                         frame = self.video_reader.get_frame(idx)
                         
-                        # Apply low quality for preloaded frames - STANDARDIZE TO SCALE FACTOR 3
+                        # Convert BGR to RGB
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        
+                        # Apply low quality for preloaded frames
                         h, w = frame.shape[:2]
                         scale_factor = 3  # Use consistent scale factor of 3 throughout
                         small_w, small_h = w//scale_factor, h//scale_factor

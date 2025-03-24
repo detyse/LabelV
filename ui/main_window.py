@@ -6,7 +6,7 @@ import json
 import time
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                               QToolBar, QFileDialog, QMessageBox, QDockWidget, QFrame)
-from PySide6.QtCore import Qt, Slot, QSettings, QEvent
+from PySide6.QtCore import Qt, Slot, QSettings, QEvent, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 
 from ui.video_player import VideoPlayer
@@ -331,6 +331,10 @@ class MainWindow(QMainWindow):
 
     def play_label_segment(self, start_frame, end_frame):
         """Play a specific video segment from start to end frame."""
+        # Stop any current playback first
+        if self.video_player.is_playing():
+            self.video_player.pause()
+        
         # Ensure video player is properly set to low quality mode before playback
         if hasattr(self.video_player, 'set_scrubbing_quality'):
             self.video_player.set_scrubbing_quality("low")
@@ -341,7 +345,13 @@ class MainWindow(QMainWindow):
         # Reset any active scrubbing state that might interfere with playback
         self.video_player.scrubbing_active = False
         
-        # Set playback range
+        # Additional logging for debugging
+        self.video_player.logger.info(f"Playing label segment from {start_frame} to {end_frame}")
+        
+        # First seek to the start frame before setting playback range
+        self.video_player.set_position(start_frame)
+        
+        # Then set playback range
         self.video_player.set_playback_range(start_frame, end_frame)
         
         # Make sure playback speed is properly applied
@@ -349,11 +359,11 @@ class MainWindow(QMainWindow):
         if current_speed < 0.5:  # If speed is too slow, reset it
             self.video_player.set_playback_speed("1.0x")
         
-        # Start playback
-        self.video_player.play()
+        # Allow a small delay for UI to update before starting playback
+        QTimer.singleShot(50, self.video_player.play)
         
         # Update status bar to confirm low quality mode
-        self.statusBar().showMessage("Playing segment in fast mode", 2000)
+        self.statusBar().showMessage(f"Playing segment in fast mode (frames {start_frame} to {end_frame})", 2000)
 
     def on_label_created(self, label_data):
         """Handle when a label is created in the timeline."""
