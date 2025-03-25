@@ -300,6 +300,19 @@ class LabelPanel(QWidget):
         
         # Emit signal for selected label
         self.label_selected.emit(label_id)
+        
+        # FETCH THE LABEL DATA FROM THE TIMELINE AND UPDATE THE EDITOR
+        # Get the parent window to access timeline
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'timeline'):
+                # Find and update the label data
+                for label in parent.timeline.labels:
+                    if label.id == label_id:
+                        self.update_label_data(label.to_dict())
+                        break
+                break
+            parent = parent.parent()
     
     def add_label_to_list(self, label_data):
         """Add a label to the list widget."""
@@ -492,3 +505,28 @@ class LabelPanel(QWidget):
         
         # Rest of your existing label creation code
         # ... 
+
+    def apply_changes(self):
+        """Apply changes to the current label."""
+        if self.current_label_id is None:
+            return
+        
+        # Get current values
+        name = self.name_edit.text()
+        description = self.description_edit.toPlainText()
+        color = self.color_button.color()
+        
+        # Extract category from name (e.g., "3. return" -> "return")
+        category = "default"
+        if '.' in name:
+            parts = name.split('.')
+            if len(parts) > 1:
+                category = parts[1].strip()
+        
+        # Update the label in the timeline
+        self.label_updated.emit(self.current_label_id, {
+            'name': name,
+            'description': description,
+            'color': color,
+            'category': category
+        }) 

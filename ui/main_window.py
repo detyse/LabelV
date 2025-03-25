@@ -4,10 +4,11 @@
 import os
 import json
 import time
+import uuid
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                               QToolBar, QFileDialog, QMessageBox, QDockWidget, QFrame)
 from PySide6.QtCore import Qt, Slot, QSettings, QEvent, QTimer
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence, QColor
 
 from ui.video_player import VideoPlayer
 from ui.timeline import TimelineWidget
@@ -81,6 +82,9 @@ class MainWindow(QMainWindow):
             self.update_template_selection
         )
         
+        # Connect label panel selection to timeline
+        self.label_panel.label_selected.connect(self.timeline.select_label)
+        
         # Create toolbar and actions
         self.create_actions()
         self.create_toolbar()
@@ -114,16 +118,22 @@ class MainWindow(QMainWindow):
         self.open_video_action.setShortcut(QKeySequence.Open)
         self.open_video_action.triggered.connect(self.open_video)
         
-        # Save project action
-        self.save_project_action = QAction("Save Project", self)
-        self.save_project_action.setShortcut(QKeySequence.Save)
-        self.save_project_action.setEnabled(False)
-        self.save_project_action.triggered.connect(self.save_project)
-        
         # Export labels action
         self.export_labels_action = QAction("Export Labels", self)
         self.export_labels_action.setEnabled(False)
         self.export_labels_action.triggered.connect(self.export_labels)
+        
+        # Save labels action (new)
+        self.save_labels_action = QAction("Save Labels", self)
+        self.save_labels_action.setShortcut(QKeySequence("Ctrl+S"))
+        self.save_labels_action.setEnabled(False)
+        self.save_labels_action.triggered.connect(self.save_labels)
+        
+        # Load labels action (new)
+        self.load_labels_action = QAction("Load Labels", self)
+        self.load_labels_action.setShortcut(QKeySequence("Ctrl+L"))
+        self.load_labels_action.setEnabled(False)
+        self.load_labels_action.triggered.connect(self.load_labels)
         
         # Mode actions
         self.mode_action_choose = QAction("View Mode", self)
@@ -135,11 +145,6 @@ class MainWindow(QMainWindow):
         self.mode_action_edit.setShortcut(QKeySequence("X"))
         self.mode_action_edit.setCheckable(True)
         self.mode_action_edit.triggered.connect(lambda: self.timeline.set_mode(self.timeline.EDIT_MODE))
-        
-        # Update the quality action to indicate permanent low quality mode
-        self.quality_action = QAction("Fast Mode Always Enabled (For Best Performance)", self)
-        self.quality_action.setCheckable(False)
-        self.quality_action.setEnabled(False)  # Disable the action
     
     def create_toolbar(self):
         """Create application toolbar."""
@@ -147,7 +152,8 @@ class MainWindow(QMainWindow):
         self.addToolBar(toolbar)
         
         toolbar.addAction(self.open_video_action)
-        toolbar.addAction(self.save_project_action)
+        toolbar.addAction(self.save_labels_action)
+        toolbar.addAction(self.load_labels_action)
         toolbar.addAction(self.export_labels_action)
         
         # Add separator
@@ -156,9 +162,6 @@ class MainWindow(QMainWindow):
         # Add mode actions
         toolbar.addAction(self.mode_action_choose)
         toolbar.addAction(self.mode_action_edit)
-        
-        # Add quality toggle button
-        toolbar.addAction(self.quality_action)
     
     def update_mode(self, mode):
         """Update UI based on timeline mode."""
@@ -221,45 +224,21 @@ class MainWindow(QMainWindow):
                 # Ensure timeline gets updated
                 self.timeline.update()
                 
-                self.save_project_action.setEnabled(True)
+                # Enable label operations
+                self.save_labels_action.setEnabled(True)
+                self.load_labels_action.setEnabled(True)
                 self.export_labels_action.setEnabled(True)
+                
+                # Try to auto-load matching labels file
+                json_path = os.path.splitext(video_path)[0] + ".json"
+                if os.path.exists(json_path):
+                    response = QMessageBox.question(self, "Load Labels",
+                        f"Found label file for this video. Load it?",
+                        QMessageBox.Yes | QMessageBox.No)
+                    if response == QMessageBox.Yes:
+                        self.load_labels()
             else:
                 QMessageBox.critical(self, "Error", "Failed to open video file.")
-    
-    @Slot()
-    def save_project(self):
-        """Save the current project."""
-        if not self.current_video_path:
-            return
-            
-        if not self.current_project_path:
-            last_dir = self.settings.value("last_project_dir", "")
-            project_path, _ = QFileDialog.getSaveFileName(
-                self, "Save Project", last_dir,
-                "Label Project (*.lvp);;All Files (*)"
-            )
-            if not project_path:
-                return
-                
-            if not project_path.endswith(".lvp"):
-                project_path += ".lvp"
-                
-            self.current_project_path = project_path
-            self.settings.setValue("last_project_dir", os.path.dirname(project_path))
-        
-        # Collect data
-        project_data = {
-            "video_path": self.current_video_path,
-            "labels": self.timeline.get_labels()
-        }
-        
-        # Save project file
-        try:
-            with open(self.current_project_path, 'w') as f:
-                json.dump(project_data, f, indent=2)
-            QMessageBox.information(self, "Success", "Project saved successfully.")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save project: {str(e)}")
     
     @Slot()
     def export_labels(self):
@@ -426,3 +405,117 @@ class MainWindow(QMainWindow):
         if was_playing and self.video_player.current_mode == self.video_player.CHOOSE_MODE:
             self.video_player.playback_state['continuous_mode'] = True
             QTimer.singleShot(50, self.video_player.play) 
+
+    def save_labels(self):
+        """Save labels to JSON file with same name as video."""
+        if not self.current_video_path:
+            QMessageBox.warning(self, "Warning", "No video loaded")
+            return
+        
+        # Generate JSON path with same name as video
+        video_path = self.current_video_path
+        json_path = os.path.splitext(video_path)[0] + ".json"
+        
+        # Get current video FPS
+        fps = self.video_player.fps if hasattr(self.video_player, 'fps') else 30.0
+        
+        # Collect label data with timestamps
+        labels = self.timeline.get_labels_for_export(fps)
+        
+        # Add metadata for verification
+        export_data = {
+            "video_file": os.path.basename(self.current_video_path),
+            "video_path": self.current_video_path,
+            "fps": fps,
+            "total_frames": self.video_player.frame_count,
+            "duration": self.video_player.format_time(self.video_player.duration_sec),
+            "export_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "labels": labels
+        }
+        
+        # Export to file
+        try:
+            with open(json_path, 'w') as f:
+                json.dump(export_data, f, indent=2)
+            self.statusBar().showMessage(f"Labels saved to {json_path}", 3000)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save labels: {str(e)}")
+
+    def load_labels(self):
+        """Load labels from JSON file with same name as video."""
+        if not self.current_video_path:
+            QMessageBox.warning(self, "Warning", "No video loaded")
+            return
+        
+        # Generate JSON path with same name as video
+        video_path = self.current_video_path
+        json_path = os.path.splitext(video_path)[0] + ".json"
+        
+        # Check if file exists
+        if not os.path.exists(json_path):
+            QMessageBox.information(self, "Information", "No label file found for this video")
+            return
+        
+        try:
+            # Load JSON data
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            
+            # Verify metadata matches
+            video_basename = os.path.basename(self.current_video_path)
+            if data.get("video_file") != video_basename:
+                QMessageBox.warning(self, "Warning", 
+                                 f"Label file doesn't match video: expected {video_basename}, found {data.get('video_file')}")
+                return
+            
+            # Check frame count to ensure video hasn't changed
+            if data.get("total_frames") != self.video_player.frame_count:
+                response = QMessageBox.question(self, "Warning", 
+                    "Frame count mismatch. Video may have changed. Load labels anyway?",
+                    QMessageBox.Yes | QMessageBox.No)
+                if response == QMessageBox.No:
+                    return
+            
+            # Clear existing labels properly
+            self.timeline.clear()
+            self.timeline.set_frame_count(self.video_player.frame_count)  # Restore frame count
+            self.label_panel.clear_editor()
+            
+            # Process and add each label
+            labels_loaded = 0
+            for label_data in data.get("labels", []):
+                # Get order and category
+                order = label_data.get("order", 0)
+                category = label_data.get("category", "default")
+                
+                # Format name as "order. category"
+                formatted_name = f"{order}. {category}" if order > 0 else category
+                
+                # Create internal label with proper fields and default color
+                internal_label = {
+                    "id": label_data.get("id", str(uuid.uuid4())),
+                    "text": formatted_name,
+                    "name": formatted_name,
+                    "start_frame": label_data.get("start_frame", 0),
+                    "end_frame": label_data.get("end_frame", 0),
+                    "category": category,
+                    "description": label_data.get("description", ""),
+                    # No color specified - will use default or category-based
+                }
+                
+                # Add to timeline
+                success = self.timeline.add_label(internal_label)
+                if success:
+                    # Also add to label panel list
+                    self.label_panel.add_label_to_list(internal_label)
+                    labels_loaded += 1
+            
+            # Explicitly update the UI after loading
+            self.timeline.update()
+            
+            self.statusBar().showMessage(f"Loaded {labels_loaded} labels from {json_path}", 3000)
+            
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            QMessageBox.critical(self, "Error", f"Failed to load labels: {str(e)}\n\nDetails: {error_details}") 

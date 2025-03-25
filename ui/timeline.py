@@ -47,10 +47,27 @@ class Label:
         end_time = self.format_timestamp(end_time_sec)
         duration = self.format_timestamp(duration_sec)
         
+        # Extract order number from label name if it follows the pattern "1. Name"
+        order = 0
+        if self.name and '.' in self.name:
+            try:
+                order_str = self.name.split('.')[0].strip()
+                order = int(order_str)
+            except (ValueError, IndexError):
+                pass
+        
+        # Extract category from name if format is "3. category"
+        category = self.category
+        if self.name and '.' in self.name:
+            parts = self.name.split('.')
+            if len(parts) > 1:
+                # Use everything after the dot and number as the category
+                category = parts[1].strip()
+        
         return {
             "id": self.id,
-            "category": self.category,
-            "name": self.name,
+            "order": order,
+            "category": category,
             "start_frame": self.start_frame,
             "end_frame": self.end_frame,
             "start_time": start_time,
@@ -70,10 +87,17 @@ class Label:
     @classmethod
     def from_dict(cls, data):
         """Create label from dictionary."""
-        color = QColor(*data.get("color", [255, 165, 0, 180]))
+        # Handle different color formats
+        if isinstance(data.get("color"), QColor):
+            # Already a QColor object, use it directly
+            color = data.get("color")
+        else:
+            # List of RGB(A) values or default
+            color = QColor(*data.get("color", [255, 165, 0, 180]))
+        
         return cls(
             label_id=data.get("id"),
-            name=data.get("name", "Unnamed"),
+            name=data.get("name", data.get("text", "Unnamed")),  # Support both name and text keys
             start_frame=data.get("start_frame", 0),
             end_frame=data.get("end_frame", 0),
             color=color,
@@ -567,9 +591,22 @@ class TimelineWidget(QWidget):
     
     @Slot(dict)
     def add_label(self, label_data):
-        """Add a new label."""
+        """Add a new label to the timeline."""
+        # Ensure label has consistent name and text fields
+        if 'name' in label_data and 'text' not in label_data:
+            label_data['text'] = label_data['name']
+        elif 'text' in label_data and 'name' not in label_data:
+            label_data['name'] = label_data['text']
+        
         # Create label from data
         label = Label.from_dict(label_data)
+        
+        # Apply category-based coloring
+        if hasattr(self, 'category_colors') and label.category in self.category_colors:
+            label.color = self.category_colors[label.category]
+        else:
+            # Assign default color
+            label.color = QColor(255, 165, 0, 180)  # Default orange with transparency
         
         # Add to labels list
         self.labels.append(label)
@@ -578,6 +615,7 @@ class TimelineWidget(QWidget):
         self.select_label_by_id(label.id)
         
         self.update()
+        return True
     
     @Slot(str)
     def remove_label(self, label_id):

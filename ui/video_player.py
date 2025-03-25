@@ -648,7 +648,7 @@ class VideoPlayer(QWidget):
         
         # Create file handler
         file_handler = logging.FileHandler('video_player.log')
-        file_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(logging.WARNING)
         
         # Create console handler
         console_handler = logging.StreamHandler()
