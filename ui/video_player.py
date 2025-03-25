@@ -155,7 +155,7 @@ def get_codec_info(cap):
     }
 
 class FrameLoader(QRunnable):
-    """Worker to load frames in background."""
+    """Improved frame loader with better error handling and metrics."""
     
     def __init__(self, video_reader, frame_idx, callback):
         super().__init__()
@@ -163,6 +163,8 @@ class FrameLoader(QRunnable):
         self.frame_idx = frame_idx
         self.callback = callback
         self.quality_mode = "low"
+        # Need to track if this is being closed
+        self._is_closing = False
     
     def set_quality_mode(self, mode):
         """Set the quality mode for frame loading."""
@@ -170,8 +172,12 @@ class FrameLoader(QRunnable):
         self.quality_mode = "low"
         
     def run(self):
-        """Load the frame in background."""
+        """Run the frame loading task with performance tracking."""
+        start_time = time.time()
         try:
+            # FIXED: Remove parent reference that doesn't exist
+            # No need for mutex lock here since VideoReader has its own thread safety
+            
             frame = self.video_reader.get_frame(self.frame_idx)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
@@ -180,10 +186,16 @@ class FrameLoader(QRunnable):
             small_w, small_h = w//LOW_QUALITY_SCALE, h//LOW_QUALITY_SCALE
             frame = cv2.resize(frame, (small_w, small_h), interpolation=RESIZE_METHOD)
             
-            self.callback(self.frame_idx, frame)
+            # Track performance - removed reference to self.parent
+            end_time = time.time()
+            load_time_ms = (end_time - start_time) * 1000
+            
+            # Simply call the callback with the loaded frame
+            if self.callback and not self._is_closing:
+                self.callback(self.frame_idx, frame, load_time_ms)
             
         except Exception as e:
-            self.callback(self.frame_idx, None)
+            print(f"Error in FrameLoader for frame {self.frame_idx}: {e}")
 
 
 class FrameCache:
@@ -504,6 +516,7 @@ class VideoPlayer(QWidget):
     duration_changed = Signal(int)  # Total frames
     
     def __init__(self, parent=None):
+        """Initialize with improved thread and cache management."""
         super().__init__(parent)
         
         # Video properties
@@ -548,10 +561,12 @@ class VideoPlayer(QWidget):
         
         # Add performance metrics
         self.metrics = {
-            'load_time': 0,
-            'display_time': 0,
-            'total_time': 0,
-            'frames_processed': 0
+            'frames_processed': 0,
+            'last_update_time': time.time(),
+            'last_load_time': 0,
+            'cache_hits': 0,
+            'system_load': 0,
+            'display_time': 0  # Add missing key
         }
         
         # Add a label to display metrics
@@ -592,11 +607,41 @@ class VideoPlayer(QWidget):
         # Create UI
         self.setup_ui()
         
+        # Setup logger
+        self.logger = self._setup_logger()
+        
+        # Adaptive cache size based on video length and available memory
+        self.adaptive_cache_size = 200  # Default value
+        
+        # Configure improved thread pools
+        self.configure_thread_pools()
+        
+        # Initialize metrics
+        self.metrics = {
+            'frames_processed': 0,
+            'last_update_time': time.time(),
+            'last_load_time': 0,
+            'cache_hits': 0,
+            'system_load': 0,
+            'display_time': 0  # Add missing key
+        }
+        
+        # Adaptive quality management
+        self.performance_tracker = {
+            'recent_load_times': [],  # Store recent load times
+            'load_threshold': 100,    # Threshold in ms
+            'quality_lock': False
+        }
+        
         # Setup logging
-        self.logger = self.setup_logging()
         self.logger.info("Video player initialized")
+        
+        # Add metrics update timer that was missing
+        self.metrics_update_timer = QTimer(self)
+        self.metrics_update_timer.timeout.connect(self.update_metrics)
+        self.metrics_update_timer.start(500)  # Update every 500ms
     
-    def setup_logging(self):
+    def _setup_logger(self):
         """Set up detailed logging for video player."""
         logger = logging.getLogger('video_player')
         logger.setLevel(logging.DEBUG)
@@ -607,7 +652,7 @@ class VideoPlayer(QWidget):
         
         # Create console handler
         console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
+        console_handler.setLevel(logging.WARNING)
         
         # Create formatter
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -705,8 +750,57 @@ class VideoPlayer(QWidget):
         self.seek_slider.valueChanged.connect(self.slider_value_changed)
         layout.addWidget(self.seek_slider)
     
+    def configure_thread_pools(self):
+        """Configure thread pools with adaptive sizing."""
+        # Get physical CPU count for better thread management
+        import multiprocessing
+        cpu_count = max(2, multiprocessing.cpu_count())
+        
+        # Main frame loading pool - higher priority, smaller size
+        self.thread_pool = QThreadPool.globalInstance()
+        self.thread_pool.setMaxThreadCount(min(4, cpu_count // 2))
+        
+        # Dedicated preloading pool with lower priority
+        self.preload_pool = QThreadPool()
+        self.preload_pool.setMaxThreadCount(min(4, cpu_count // 2))
+        
+        # Set expiry timeout to keep threads alive longer
+        self.thread_pool.setExpiryTimeout(10000)  # 10 seconds
+        self.preload_pool.setExpiryTimeout(10000)  # 10 seconds
+        
+        self.logger.info(f"Thread pools configured: main={self.thread_pool.maxThreadCount()}, "
+                        f"preload={self.preload_pool.maxThreadCount()}, "
+                        f"CPU cores={cpu_count}")
+
+    def calculate_adaptive_cache_size(self):
+        """Calculate optimal cache size based on video length and available memory."""
+        # Default cache size
+        default_size = 200
+        
+        if not hasattr(self, 'frame_count') or self.frame_count <= 0:
+            return default_size
+        
+        # Get available system memory
+        try:
+            import psutil
+            avail_mem = psutil.virtual_memory().available
+            # Calculate rough frame size based on dimensions and bit depth
+            frame_size = (self.frame_width * self.frame_height * 3) if hasattr(self, 'frame_width') else 1920*1080*3
+            
+            # Use 20% of available memory at most
+            max_frames = int(avail_mem * 0.2 / frame_size)
+            
+            # Cap at reasonable limits
+            cache_size = min(max(50, max_frames), 1000)
+            
+            self.logger.info(f"Adaptive cache size: {cache_size} frames (based on {frame_size/1024/1024:.1f}MB per frame)")
+            return cache_size
+        except Exception as e:
+            self.logger.warning(f"Error calculating cache size: {e}, using default={default_size}")
+            return default_size
+
     def load_video(self, video_path):
-        """Load a video file."""
+        """Load a video file with improved caching."""
         try:
             print(f"\n===== Loading Video: {Path(video_path).name} =====")
             
@@ -758,8 +852,17 @@ class VideoPlayer(QWidget):
             # Update FPS display with actual video metadata
             self.fps_label.setText(f"Video FPS: {self.fps:.2f}")
             
-            # Clear cache
-            self.frame_cache.clear()
+            # Clear existing cache before recreating
+            if hasattr(self, 'frame_cache'):
+                try:
+                    self.frame_cache.clear()
+                except:
+                    pass
+            
+            # Create new LRUCache with proper size
+            self.adaptive_cache_size = self.calculate_adaptive_cache_size()
+            self.frame_cache = LRUCache(self.adaptive_cache_size)
+            self.logger.info(f"Created new frame cache with capacity: {self.adaptive_cache_size}")
             
             # Set up UI with a short delay to ensure UI is updated
             QApplication.processEvents()
@@ -788,6 +891,9 @@ class VideoPlayer(QWidget):
             self.fast_backward_button.setEnabled(True)
             self.fast_forward_button.setEnabled(True)
             
+            # Preload more frames on startup for smoother initial playback
+            QTimer.singleShot(200, lambda: self.preload_frames(0, preload_count=10))
+            
             return True
             
         except Exception as e:
@@ -797,15 +903,31 @@ class VideoPlayer(QWidget):
             return False
             
     def load_frame(self, frame_idx):
-        """Load a specific frame with consistent low quality."""
+        """Load a frame with improved error handling and metrics."""
         if frame_idx < 0 or frame_idx >= self.frame_count:
             return
         
-        # Check cache first
-        cached_frame = self.frame_cache.get(frame_idx)
-        if cached_frame is not None:
-            self.display_frame(cached_frame)
-            return
+        start_time = time.time()
+        
+        # Check if frame is in cache first
+        if frame_idx in self.frame_cache:
+            frame = self.frame_cache[frame_idx]
+            # Update metrics for cache hits
+            if hasattr(self, 'metrics'):
+                self.metrics.setdefault('cache_hits', 0)
+                self.metrics['cache_hits'] += 1
+            
+            # Set the frame and update UI
+            self.display_frame(frame)
+            
+            # Even for cache hits, track load time for metrics
+            end_time = time.time()
+            load_time_ms = (end_time - start_time) * 1000
+            if hasattr(self, 'metrics'):
+                self.metrics['last_load_time'] = end_time - start_time
+            
+            # Return success
+            return True
         
         try:
             # Load and process frame
@@ -817,14 +939,29 @@ class VideoPlayer(QWidget):
             small_w, small_h = w//LOW_QUALITY_SCALE, h//LOW_QUALITY_SCALE
             frame = cv2.resize(frame, (small_w, small_h), interpolation=RESIZE_METHOD)
             
-            # Cache the downscaled version only
-            self.frame_cache.put(frame_idx, frame)
+            # Track performance
+            end_time = time.time()
+            load_time_ms = (end_time - start_time) * 1000
+            self.track_frame_load_performance(load_time_ms)
+            
+            # Add frame to cache using LRUCache dictionary style
+            self.frame_cache[frame_idx] = frame
             
             # Display the frame
             self.display_frame(frame)
             
+            # Update metrics for direct loads
+            end_time = time.time()
+            load_time_ms = (end_time - start_time) * 1000
+            if hasattr(self, 'metrics'):
+                self.metrics['last_load_time'] = end_time - start_time
+                self.metrics['frames_processed'] += 1
+            
+            return True
+            
         except Exception as e:
             print(f"Error loading frame {frame_idx}: {e}")
+            return False
 
     def display_frame(self, frame):
         """Display a frame using consistent upscaling."""
@@ -833,6 +970,9 @@ class VideoPlayer(QWidget):
                 return
             
             try:
+                # Start timing display operation
+                display_start_time = time.time()
+                
                 # All frames are stored at reduced size, upscale for display
                 h, w = frame.shape[:2]
                 
@@ -846,6 +986,9 @@ class VideoPlayer(QWidget):
                 
                 # Set pixmap to label
                 self.video_label.setPixmap(scaled_pixmap)
+                
+                # Calculate and store display time
+                self.metrics['display_time'] = time.time() - display_start_time
                 
                 # Update metrics and time label
                 self.update_time_label()
@@ -901,11 +1044,15 @@ class VideoPlayer(QWidget):
             if self.playback_speed > 2.0:
                 for i in range(1, min(int(self.playback_speed * 2), 10)):
                     future_frame = next_frame + i
-                    if future_frame < self.frame_count and self.frame_cache.get(future_frame) is None:
-                        # Use video_reader instead of path
-                        preload_task = FrameLoader(self.video_reader, future_frame, self.preload_callback)
-                        preload_task.set_quality_mode("low")
-                        self.preload_thread_pool.start(preload_task)
+                    # FIXED: Use 'in' operator for LRUCache compatibility
+                    if future_frame < self.frame_count and future_frame not in self.frame_cache:
+                        try:
+                            # FIXED: Use direct loading instead of FrameLoader
+                            # This is a simpler approach that avoids thread pool issues
+                            if self.preload_enabled:
+                                QTimer.singleShot(0, lambda f=future_frame: self.preload_frame_direct(f))
+                        except Exception as e:
+                            print(f"Error scheduling preload for frame {future_frame}: {e}")
     
     @Slot()
     def previous_frame(self):
@@ -986,8 +1133,8 @@ class VideoPlayer(QWidget):
         super().closeEvent(event)
 
     def play(self):
-        """Start video playback with improved state management."""
-        if not hasattr(self, 'video_reader') or self.video_reader is None:
+        """Start playback with improved handling."""
+        if self.is_playing():
             return
         
         # Always force low quality mode during playback
@@ -1013,7 +1160,7 @@ class VideoPlayer(QWidget):
                 self.playback_speed = 1.0
             
             # Calculate interval based on FPS and playback speed
-            interval = int(1000 / (self.fps * self.playback_speed)) if self.fps > 0 else 33
+            interval = int(1000 / (self.fps * self.playback_speed))
             
             # Ensure minimum interval to prevent UI freezing
             interval = max(10, interval)
@@ -1162,9 +1309,9 @@ class VideoPlayer(QWidget):
 
     def update_metrics_display(self):
         """Update the metrics display label."""
-        load_ms = self.metrics['load_time'] * 1000
+        load_ms = self.metrics['last_load_time'] * 1000
         display_ms = self.metrics['display_time'] * 1000
-        total_ms = (self.metrics['load_time'] + self.metrics['display_time']) * 1000
+        total_ms = (self.metrics['last_load_time'] + self.metrics['display_time']) * 1000
         fps_approx = 1000 / total_ms if total_ms > 0 else 0
         
         metrics_text = (
@@ -1191,71 +1338,65 @@ class VideoPlayer(QWidget):
         # No need to reload the current frame in high quality
         # Just keep the current frame as is
 
-    def set_scrubbing_quality(self, mode):
-        """Set scrubbing quality mode - always uses low quality for better performance."""
-        # Force low quality mode for better performance
-        actual_mode = "low"
+    def set_scrubbing_quality(self, quality):
+        """Set scrubbing quality with adaptive adjustment."""
+        old_quality = self.scrubbing_mode
+        self.scrubbing_mode = quality
         
-        # Update log for debugging purposes
-        self.logger.info(f"Scrubbing quality requested: {mode}, but using: {actual_mode}")
+        # Check if we should override quality based on system performance
+        if hasattr(self, 'performance_tracker'):
+            if len(self.performance_tracker['recent_load_times']) >= 5:
+                avg_load_time = sum(self.performance_tracker['recent_load_times']) / \
+                               len(self.performance_tracker['recent_load_times'])
+                
+                # If average load time is too high, force low quality
+                if avg_load_time > self.performance_tracker['load_threshold']:
+                    self.scrubbing_mode = "low"
+                    self.logger.info(f"Adaptive quality override: {quality} → low (avg load: {avg_load_time:.1f}ms)")
+                elif self.scrubbing_mode == "low" and avg_load_time < (self.performance_tracker['load_threshold'] * 0.7):
+                    # If performance is good, allow higher quality
+                    self.scrubbing_mode = quality
         
-        # If we have a thread pool, update all workers
-        if hasattr(self, 'thread_pool') and self.thread_pool:
-            # This implementation depends on how workers are managed
-            pass  # Any worker-updating code would go here
+        self.logger.info(f"Scrubbing quality requested: {quality}, using: {self.scrubbing_mode}")
+        return old_quality != self.scrubbing_mode
 
-    def preload_frames(self, current_idx):
-        """Preload frames to improve playback smoothness."""
-        # Don't preload during scrubbing
-        if self.scrubbing_active:
+    def preload_frames(self, current_idx, preload_count=None):
+        """Improved adaptive preloading strategy."""
+        if not hasattr(self, 'cap') or self.cap is None:
             return
         
-        # Always ensure scrubbing_mode is low for preloading
-        self.scrubbing_mode = "low"
-        
-        # Calculate frames to preload
-        if self.playing:
-            # When playing, preload frames ahead
-            frames_to_preload = [i for i in range(
-                current_idx + 1,
-                min(current_idx + 1 + int(4 * self.playback_speed), self.frame_count)
-            )]
+        # Adaptive preload window based on playback state and recent performance
+        if preload_count is None:
+            if self.is_playing():
+                # When playing, preload more in the playback direction
+                direction = 1 if not self.is_reversed else -1
+                preload_range = range(current_idx + direction, 
+                                     current_idx + direction * 15, 
+                                     direction)
+            else:
+                # When paused, preload evenly around current position
+                preload_range = list(range(current_idx - 10, current_idx)) + \
+                               list(range(current_idx + 1, current_idx + 11))
         else:
-            # When paused, preload frames in both directions
-            frames_to_preload = [
-                i for i in range(
-                    max(0, current_idx - 5),
-                    min(current_idx + 5, self.frame_count)
-                ) if i != current_idx
-            ]
+            # Use specified preload count
+            preload_range = range(current_idx + 1, current_idx + preload_count + 1)
         
-        # Start a low-priority thread to preload frames
-        if frames_to_preload:
-            def preload_worker():
-                for idx in frames_to_preload:
-                    if self._is_closing or self.frame_cache.get(idx) is not None:
-                        continue
-                    
-                    try:
-                        # Get frame from MediaVideo reader
-                        frame = self.video_reader.get_frame(idx)
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        
-                        # Use EXACT same downscaling as main thread
-                        h, w = frame.shape[:2]
-                        small_w, small_h = w//LOW_QUALITY_SCALE, h//LOW_QUALITY_SCALE
-                        frame = cv2.resize(frame, (small_w, small_h), interpolation=RESIZE_METHOD)
-                        
-                        # Store downscaled frame in cache
-                        self.frame_cache.put(idx, frame)
-                        
-                    except Exception as e:
-                        pass
-            
-            # Start thread
-            preload_task = threading.Thread(target=preload_worker)
-            preload_task.daemon = True
-            preload_task.start()
+        # Filter out invalid frame indices
+        valid_preload = [i for i in preload_range if 0 <= i < self.frame_count and i not in self.frame_cache]
+        
+        # Prioritize frames - closer frames get higher priority
+        valid_preload.sort(key=lambda x: abs(x - current_idx))
+        
+        # Limit the number of simultaneous preload requests
+        max_preload = min(10, len(valid_preload))
+        for idx in valid_preload[:max_preload]:
+            try:
+                # Lower priority for preloading
+                loader = FrameLoader(self, idx, quality=self.scrubbing_mode, is_preload=True)
+                loader.signals.result.connect(self.preload_worker)
+                self.preload_pool.start(loader)
+            except Exception as e:
+                self.logger.warning(f"Preload error at frame {idx}: {e}")
 
     def preload_callback(self, frame_idx, frame, load_time=None):
         """Callback for preloaded frames - just add to cache."""
@@ -1493,11 +1634,23 @@ class VideoPlayer(QWidget):
     def cleanup_cache(self):
         """Periodically clean up the cache to prevent memory bloat."""
         with QMutexLocker(self.cache_mutex):
-            if len(self.frame_cache.cache) > self.frame_cache.max_size * 0.9:
-                # Only keep the most recently used frames
-                self.frame_cache.cache = OrderedDict(
-                    list(self.frame_cache.cache.items())[-self.frame_cache.max_size:]
-                ) 
+            # FIX: Use capacity for LRUCache instead of max_size
+            if hasattr(self.frame_cache, 'capacity'):
+                # For LRUCache
+                if len(self.frame_cache.cache) > self.frame_cache.capacity * 0.9:
+                    # Only keep the most recently used frames
+                    oldest_keys = sorted(self.frame_cache.lru.items(), key=lambda x: x[1])[:len(self.frame_cache.cache)//2]
+                    for k, _ in oldest_keys:
+                        if k in self.frame_cache.cache:
+                            del self.frame_cache.cache[k]
+                            del self.frame_cache.lru[k]
+            elif hasattr(self.frame_cache, 'max_size'):
+                # For original FrameCache if still in use
+                if len(self.frame_cache.cache) > self.frame_cache.max_size * 0.9:
+                    # Only keep the most recently used frames
+                    self.frame_cache.cache = OrderedDict(
+                        list(self.frame_cache.cache.items())[-self.frame_cache.max_size:]
+                    )
 
     def _detect_fallback_fps(self, video_path):
         """Try multiple methods to detect FPS if main method fails."""
@@ -1600,4 +1753,131 @@ class VideoPlayer(QWidget):
         
         # Signal
         self.position_changed.emit(start_frame)
+
+    def update_metrics(self):
+        """Update performance metrics with improved cache hit tracking."""
+        current_time = time.time()
+        elapsed = current_time - self.metrics['last_update_time']
+        
+        # Only update if enough time has passed to get meaningful data
+        if elapsed >= 0.5:  # Update metrics every half second
+            frames_processed = self.metrics['frames_processed']
+            cache_hits = self.metrics.get('cache_hits', 0)  # Track cache hits
+            total_frames = frames_processed + cache_hits
+            
+            # Calculate processing FPS with error handling
+            if elapsed > 0 and total_frames > 0:
+                fps = total_frames / elapsed
+                # Update display with both metrics
+                self.metrics_label.setText(
+                    f"Load: {self.metrics['last_load_time']*1000:.1f}ms | "
+                    f"Processing: {fps:.1f} FPS | "
+                    f"Cache hit: {(cache_hits/total_frames)*100:.1f}% ({cache_hits}/{total_frames})"
+                )
+            else:
+                # Safe fallback when no frames processed
+                self.metrics_label.setText("Load: --ms | Processing: --FPS")
+            
+            # Reset counters
+            self.metrics['last_update_time'] = current_time
+            self.metrics['frames_processed'] = 0
+            self.metrics['cache_hits'] = 0
+
+    def track_frame_load_performance(self, load_time_ms):
+        """Track frame loading performance for adaptive quality decisions."""
+        if not hasattr(self, 'performance_tracker'):
+            return
+        
+        # Keep a rolling window of recent load times
+        self.performance_tracker['recent_load_times'].append(load_time_ms)
+        if len(self.performance_tracker['recent_load_times']) > 10:
+            self.performance_tracker['recent_load_times'].pop(0)
+        
+        # Check if we need to adjust quality based on load times
+        if len(self.performance_tracker['recent_load_times']) >= 5:
+            avg_load_time = sum(self.performance_tracker['recent_load_times']) / \
+                           len(self.performance_tracker['recent_load_times'])
+            
+            # Log significant changes in performance
+            if avg_load_time > self.performance_tracker['load_threshold'] * 1.5:
+                self.logger.warning(f"Performance degrading: avg load time {avg_load_time:.1f}ms")
+            elif avg_load_time < self.performance_tracker['load_threshold'] * 0.5:
+                self.logger.info(f"Performance improving: avg load time {avg_load_time:.1f}ms")
+
+    def preload_worker(self, frame_idx):
+        """Handle preloaded frames with LRUCache compatibility."""
+        try:
+            if not self._is_closing and frame_idx is not None:
+                # Use direct dictionary-style assignment for LRUCache
+                if hasattr(self, 'frame_cache') and frame_idx not in self.frame_cache:
+                    frame = self.video_reader.get_frame(frame_idx)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    
+                    # Use EXACT same downscaling as other methods
+                    h, w = frame.shape[:2]
+                    small_w, small_h = w//LOW_QUALITY_SCALE, h//LOW_QUALITY_SCALE
+                    frame = cv2.resize(frame, (small_w, small_h), interpolation=RESIZE_METHOD)
+                    
+                    # Add to cache using LRUCache dictionary style
+                    self.frame_cache[frame_idx] = frame
+        except Exception as e:
+            self.logger.warning(f"Error in preload worker for frame {frame_idx}: {e}")
+
+    def preload_frame_direct(self, frame_idx):
+        """Preload a frame directly without using thread pool."""
+        try:
+            if frame_idx not in self.frame_cache and frame_idx < self.frame_count:
+                frame = self.video_reader.get_frame(frame_idx)
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                # Use EXACT same downscaling as other methods
+                h, w = frame.shape[:2]
+                small_w, small_h = w//LOW_QUALITY_SCALE, h//LOW_QUALITY_SCALE
+                frame = cv2.resize(frame, (small_w, small_h), interpolation=RESIZE_METHOD)
+                
+                # Add to cache using LRUCache dictionary style
+                self.frame_cache[frame_idx] = frame
+        except Exception as e:
+            print(f"Error in direct preload for frame {frame_idx}: {e}")
+
+
+# Add a new LRUCache class with better performance
+class LRUCache:
+    """Improved LRU cache with performance optimizations."""
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.cache = {}
+        self.lru = {}
+        self.counter = 0
+        self._lock = QMutex()
+    
+    def __contains__(self, key):
+        return key in self.cache
+    
+    def __getitem__(self, key):
+        with QMutexLocker(self._lock):
+            self.lru[key] = self.counter
+            self.counter += 1
+            return self.cache[key]
+    
+    def __setitem__(self, key, value):
+        with QMutexLocker(self._lock):
+            if len(self.cache) >= self.capacity and key not in self.cache:
+                # Find the least recently used item
+                oldest_key = min(self.lru.items(), key=lambda x: x[1])[0]
+                del self.cache[oldest_key]
+                del self.lru[oldest_key]
+            
+            self.cache[key] = value
+            self.lru[key] = self.counter
+            self.counter += 1
+    
+    def clear(self):
+        with QMutexLocker(self._lock):
+            self.cache.clear()
+            self.lru.clear()
+            self.counter = 0
+    
+    def __len__(self):
+        return len(self.cache)
 
