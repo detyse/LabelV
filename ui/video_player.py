@@ -163,6 +163,11 @@ class FrameLoader(QRunnable):
         self.frame_idx = frame_idx
         self.callback = callback
         self.quality_mode = "low"
+    
+    def set_quality_mode(self, mode):
+        """Set the quality mode for frame loading."""
+        # Always use low quality regardless of requested mode
+        self.quality_mode = "low"
         
     def run(self):
         """Load the frame in background."""
