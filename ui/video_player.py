@@ -23,6 +23,10 @@ from PySide6.QtWidgets import QStyle
 from PySide6.QtGui import QImage, QPixmap, QIcon
 from PySide6.QtWidgets import QApplication
 
+# Add these constants at the top of the file
+LOW_QUALITY_SCALE = 4  # Increased from 3 to 4 for maximum speed
+RESIZE_METHOD = cv2.INTER_NEAREST  # Force fastest method everywhere
+
 def check_system_capabilities():
     """Check and report system capabilities for video processing."""
     print("\n===== Video Processing System Capabilities =====")
@@ -152,108 +156,27 @@ def get_codec_info(cap):
 class FrameLoader(QRunnable):
     """Worker to load frames in background."""
     
-    def __init__(self, video_path, frame_idx, callback):
+    def __init__(self, video_reader, frame_idx, callback):
         super().__init__()
-        self.video_path = video_path
+        self.video_reader = video_reader
         self.frame_idx = frame_idx
         self.callback = callback
-        self.quality_mode = "low"  # Always use low quality mode for better performance
-        
-    def set_quality_mode(self, mode):
-        """Set the quality mode for frame loading."""
-        # Always maintain low quality mode regardless of requested mode
         self.quality_mode = "low"
         
     def run(self):
         """Load the frame in background."""
-        start_time = time.time()
-        
         try:
-            # Use FFMPEG backend explicitly for better codec support
-            backend = cv2.CAP_FFMPEG if hasattr(cv2, 'CAP_FFMPEG') else 0
-            cap = cv2.VideoCapture(self.video_path, backend)
+            frame = self.video_reader.get_frame(self.frame_idx)
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
-            # Try to enable hardware acceleration for decoding if available
-            hw_accel_success = False
-            hw_accel_methods = []
+            # Use EXACT same downscaling as other methods
+            h, w = frame.shape[:2]
+            small_w, small_h = w//LOW_QUALITY_SCALE, h//LOW_QUALITY_SCALE
+            frame = cv2.resize(frame, (small_w, small_h), interpolation=RESIZE_METHOD)
             
-            # Only try acceleration methods that are available in this OpenCV build
-            if hasattr(cv2, 'VIDEO_ACCELERATION_ANY'):
-                hw_accel_methods.append((cv2.VIDEO_ACCELERATION_ANY, "Auto-select"))
-            if hasattr(cv2, 'VIDEO_ACCELERATION_D3D11'):
-                hw_accel_methods.append((cv2.VIDEO_ACCELERATION_D3D11, "D3D11"))
-            if hasattr(cv2, 'VIDEO_ACCELERATION_VA'):
-                hw_accel_methods.append((cv2.VIDEO_ACCELERATION_VA, "VA-API"))
-            if hasattr(cv2, 'VIDEO_ACCELERATION_MFX'):
-                hw_accel_methods.append((cv2.VIDEO_ACCELERATION_MFX, "MFX"))
+            self.callback(self.frame_idx, frame)
             
-            # Try each method until one works
-            for method, name in hw_accel_methods:
-                try:
-                    cap.set(cv2.CAP_PROP_HW_ACCELERATION, method)
-                    cap.set(cv2.CAP_PROP_HW_DEVICE, 0)  # Use first available device
-                    if cap.isOpened():
-                        hw_accel_success = True
-                        # print(f"Frame loader using hardware acceleration: {name}")
-                        break
-                except Exception as e:
-                    pass
-                
-            if not hw_accel_success:
-                # print("Hardware acceleration not available for frame loading, using software decoding")
-                pass
-            
-            if not cap.isOpened():
-                # Try again with default backend
-                cap = cv2.VideoCapture(self.video_path)
-                if not cap.isOpened():
-                    raise Exception(f"Could not open video file: {self.video_path}")
-            
-            # Faster seeking to target frame using grab/retrieve approach
-            current_pos = 0
-            target_frame = self.frame_idx
-            
-            # If target is far away, use direct positioning first
-            if target_frame > 30:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
-                current_pos = target_frame
-            
-            # Fine-tune position using grab() for precision
-            if current_pos < target_frame:
-                # Skip frames using grab() without decoding them
-                for _ in range(target_frame - current_pos):
-                    if not cap.grab():
-                        break
-            
-            # Now retrieve the frame (decode only the target frame)
-            ret, frame = cap.retrieve()
-            
-            # Clean up
-            cap.release()
-            
-            if ret:
-                # Convert to RGB
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
-                # If in low quality mode, downsample the image
-                if self.quality_mode == "low":
-                    h, w = frame.shape[:2]
-                    # Faster resize with NEAREST interpolation
-                    scale_factor = 3  # Higher value = lower quality but faster
-                    small_w, small_h = w//scale_factor, h//scale_factor
-                    frame = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
-                    frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_NEAREST)
-                
-                # Calculate load time
-                load_time = time.time() - start_time
-                
-                # Call callback with frame and load time
-                self.callback(self.frame_idx, frame, load_time)
-            else:
-                print(f"Failed to retrieve frame {self.frame_idx}")
-                self.callback(self.frame_idx, None)
         except Exception as e:
-            print(f"Error loading frame {self.frame_idx}: {str(e)}")
             self.callback(self.frame_idx, None)
 
 
@@ -594,7 +517,7 @@ class VideoPlayer(QWidget):
         self.scrubbing_mode = "low"  
         
         # Frame cache
-        self.frame_cache = FrameCache(max_size=60)  # Increase cache size
+        self.frame_cache = FrameCache(max_size=120)  # Double from 60 to 120
         self.thread_pool = QThreadPool.globalInstance()
         self.thread_pool.setMaxThreadCount(2)  # Allow 2 parallel loads for main frames
         
@@ -638,6 +561,11 @@ class VideoPlayer(QWidget):
         
         # Pre-loading flag and behavior
         self.preload_enabled = True
+        
+        # Add cache cleanup timer to periodically trim it if needed
+        self.cache_cleanup_timer = QTimer()
+        self.cache_cleanup_timer.timeout.connect(self.cleanup_cache)
+        self.cache_cleanup_timer.start(10000)  # Every 10 seconds
         
         # Create UI
         self.setup_ui()
@@ -840,113 +768,61 @@ class VideoPlayer(QWidget):
             return False
             
     def load_frame(self, frame_idx):
-        """Load a specific frame."""
+        """Load a specific frame with consistent low quality."""
         if frame_idx < 0 or frame_idx >= self.frame_count:
             return
         
-        # Always force low quality mode for better performance
-        self.scrubbing_mode = "low"
-        
-        # Check if frame is in cache
+        # Check cache first
         cached_frame = self.frame_cache.get(frame_idx)
         if cached_frame is not None:
             self.display_frame(cached_frame)
-            
-            # Preload next frames if enabled and we're not scrubbing
-            if self.preload_enabled and not self.scrubbing_active:
-                self.preload_frames(frame_idx)
-            
             return
         
-        # Load frame directly (in main thread for reliability)
         try:
-            start_time = time.time()
-            
-            # Get frame from MediaVideo reader
+            # Load and process frame
             frame = self.video_reader.get_frame(frame_idx)
-            
-            # Convert BGR to RGB if needed
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
-            # Apply quality reduction for scrubbing if needed
-            if self.scrubbing_mode == "low":
-                h, w = frame.shape[:2]
-                # Fast downsampling and upsampling for speed
-                scale_factor = 3  # Higher value = lower quality but faster
-                small_w, small_h = w//scale_factor, h//scale_factor
-                frame = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
-                frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_NEAREST)
+            # Single downscale pass, no upscaling
+            h, w = frame.shape[:2]
+            small_w, small_h = w//LOW_QUALITY_SCALE, h//LOW_QUALITY_SCALE
+            frame = cv2.resize(frame, (small_w, small_h), interpolation=RESIZE_METHOD)
             
-            # Calculate load time
-            load_time = time.time() - start_time
-            
-            # Add to cache
+            # Cache the downscaled version only
             self.frame_cache.put(frame_idx, frame)
             
-            # Display
+            # Display the frame
             self.display_frame(frame)
-            
-            # Update metrics
-            self.metrics['load_time'] = load_time
-            self.update_metrics_display()
-            
-            # Preload next frames
-            if self.preload_enabled and not self.scrubbing_active:
-                self.preload_frames(frame_idx)
             
         except Exception as e:
             print(f"Error loading frame {frame_idx}: {e}")
-            if frame_idx > 0:
-                # Try previous frame as fallback
-                try:
-                    self.load_frame(frame_idx - 1)
-                except:
-                    pass
-    
+
     def display_frame(self, frame):
-        """Display a frame in the UI."""
-        # Use mutex to protect this function from concurrent access
+        """Display a frame using consistent upscaling."""
         with QMutexLocker(self.display_mutex):
-            # Check if widget is still valid
             if self._is_closing:
                 return
             
-            # Start timing
-            display_start = time.time()
-            
-            # Check if we are in a valid state to display the frame
             try:
-                h, w, _ = frame.shape
+                # All frames are stored at reduced size, upscale for display
+                h, w = frame.shape[:2]
                 
-                # Scale the frame to fit the label while maintaining aspect ratio
-                label_size = self.video_label.size()
-                target_size = QSize(label_size.width(), label_size.height())
-                
-                # Convert to QImage
+                # Convert to QImage at the current size
                 qimg = QImage(frame.data, w, h, frame.strides[0], QImage.Format_RGB888)
                 pixmap = QPixmap.fromImage(qimg)
                 
-                # Scale pixmap - use faster transformation when scrubbing
-                if self.scrubbing_active:
-                    scaled_pixmap = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.FastTransformation)
-                else:
-                    scaled_pixmap = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                # Always use fast transformation regardless of scrubbing state
+                target_size = self.video_label.size()
+                scaled_pixmap = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.FastTransformation)
                 
                 # Set pixmap to label
                 self.video_label.setPixmap(scaled_pixmap)
                 
-                # Calculate display time
-                display_time = time.time() - display_start
-                self.metrics['display_time'] = display_time
-                
-                # Update time label with current frame
+                # Update metrics and time label
                 self.update_time_label()
-                
-                # Update metrics display
                 self.update_metrics_display()
                 
-            except (RuntimeError, AttributeError) as e:
-                # Handle the case where the widget is in an invalid state
+            except Exception as e:
                 print(f"Error displaying frame: {e}")
     
     @Slot()
@@ -997,9 +873,9 @@ class VideoPlayer(QWidget):
                 for i in range(1, min(int(self.playback_speed * 2), 10)):
                     future_frame = next_frame + i
                     if future_frame < self.frame_count and self.frame_cache.get(future_frame) is None:
-                        # Queue pre-loading with low quality for speed
-                        preload_task = FrameLoader(self.video_path, future_frame, self.preload_callback)
-                        preload_task.set_quality_mode("low")  # Always use low quality for preloaded frames
+                        # Use video_reader instead of path
+                        preload_task = FrameLoader(self.video_reader, future_frame, self.preload_callback)
+                        preload_task.set_quality_mode("low")
                         self.preload_thread_pool.start(preload_task)
     
     @Slot()
@@ -1020,12 +896,12 @@ class VideoPlayer(QWidget):
         if frame == self.current_frame:
             return
             
-        # Calculate jump size
+        # Calculate jump size 
         jump_size = abs(frame - self.current_frame)
         
-        # For large jumps, clear the cache to avoid keeping irrelevant frames
-        if jump_size > 30:
-            self.frame_cache.clear()
+        # REMOVE cache clearing on large jumps - it causes slowdowns
+        # if jump_size > 30:
+        #     self.frame_cache.clear()
         
         if not self.scrubbing_active:
             self.scrubbing_active = True
@@ -1322,30 +1198,26 @@ class VideoPlayer(QWidget):
         if frames_to_preload:
             def preload_worker():
                 for idx in frames_to_preload:
-                    # Skip if already in cache or player is closing
                     if self._is_closing or self.frame_cache.get(idx) is not None:
                         continue
                     
                     try:
-                        # Load frame and add to cache
+                        # Get frame from MediaVideo reader
                         frame = self.video_reader.get_frame(idx)
-                        
-                        # Convert BGR to RGB
                         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         
-                        # Apply low quality for preloaded frames
+                        # Use EXACT same downscaling as main thread
                         h, w = frame.shape[:2]
-                        scale_factor = 3  # Use consistent scale factor of 3 throughout
-                        small_w, small_h = w//scale_factor, h//scale_factor
-                        frame = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
-                        frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_NEAREST)
+                        small_w, small_h = w//LOW_QUALITY_SCALE, h//LOW_QUALITY_SCALE
+                        frame = cv2.resize(frame, (small_w, small_h), interpolation=RESIZE_METHOD)
                         
+                        # Store downscaled frame in cache
                         self.frame_cache.put(idx, frame)
-                    except:
-                        # Silently ignore preload errors
+                        
+                    except Exception as e:
                         pass
             
-            # Start preload thread
+            # Start thread
             preload_task = threading.Thread(target=preload_worker)
             preload_task.daemon = True
             preload_task.start()
@@ -1582,3 +1454,12 @@ class VideoPlayer(QWidget):
         print("-------------------------------------\n")
         
         return is_valid, message 
+
+    def cleanup_cache(self):
+        """Periodically clean up the cache to prevent memory bloat."""
+        with QMutexLocker(self.cache_mutex):
+            if len(self.frame_cache.cache) > self.frame_cache.max_size * 0.9:
+                # Only keep the most recently used frames
+                self.frame_cache.cache = OrderedDict(
+                    list(self.frame_cache.cache.items())[-self.frame_cache.max_size:]
+                ) 
