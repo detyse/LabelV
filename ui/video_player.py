@@ -14,6 +14,7 @@ import os
 import attr
 import multiprocessing as mp
 from typing import Text
+import shutil
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                               QSlider, QLabel, QSizePolicy, QComboBox, QGridLayout)
@@ -517,7 +518,7 @@ class VideoPlayer(QWidget):
         self.scrubbing_mode = "low"  
         
         # Frame cache
-        self.frame_cache = FrameCache(max_size=120)  # Double from 60 to 120
+        self.frame_cache = FrameCache(max_size=200)  # Increased from 120 to 200
         self.thread_pool = QThreadPool.globalInstance()
         self.thread_pool.setMaxThreadCount(2)  # Allow 2 parallel loads for main frames
         
@@ -567,6 +568,22 @@ class VideoPlayer(QWidget):
         self.cache_cleanup_timer.timeout.connect(self.cleanup_cache)
         self.cache_cleanup_timer.start(10000)  # Every 10 seconds
         
+        # Add dedicated FPS label to UI
+        self.fps_label = QLabel("FPS: N/A")
+        self.fps_label.setStyleSheet("color: white; background-color: rgba(0,0,0,150); padding: 3px; border-radius: 3px;")
+        self.fps_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        
+        # Unified playback state management
+        self.playback_state = {
+            'playing': False,
+            'segment_mode': False,
+            'continuous_mode': False,
+            'last_playback_mode': 'normal'  # 'normal', 'segment'
+        }
+        
+        # Add this flag
+        self.continue_after_segment = True
+        
         # Create UI
         self.setup_ui()
         
@@ -612,6 +629,7 @@ class VideoPlayer(QWidget):
         self.video_layout = QGridLayout()
         self.video_layout.addWidget(self.video_label, 0, 0, 1, 2)
         self.video_layout.addWidget(self.metrics_label, 0, 1, 1, 1, Qt.AlignRight | Qt.AlignTop)
+        self.video_layout.addWidget(self.fps_label, 0, 0, 1, 1, Qt.AlignLeft | Qt.AlignTop)
         
         # Add video layout to main layout
         layout.addLayout(self.video_layout)
@@ -705,6 +723,9 @@ class VideoPlayer(QWidget):
             self.video_path = video_path
             self.frame_count = self.video_reader.frames
             self.fps = self.video_reader.fps
+            if self.fps <= 0:
+                # Try additional FPS detection methods if primary fails
+                self.fps = self._detect_fallback_fps(video_path)
             self.duration_sec = self.frame_count / self.fps
             self.current_frame = 0
             
@@ -728,6 +749,9 @@ class VideoPlayer(QWidget):
             self.next_frame_button.setEnabled(True)
             
             self.update_time_label()
+            
+            # Update FPS display with actual video metadata
+            self.fps_label.setText(f"Video FPS: {self.fps:.2f}")
             
             # Clear cache
             self.frame_cache.clear()
@@ -899,10 +923,6 @@ class VideoPlayer(QWidget):
         # Calculate jump size 
         jump_size = abs(frame - self.current_frame)
         
-        # REMOVE cache clearing on large jumps - it causes slowdowns
-        # if jump_size > 30:
-        #     self.frame_cache.clear()
-        
         if not self.scrubbing_active:
             self.scrubbing_active = True
             self.scrubbing_mode = "low"  # Switch to low quality during scrubbing
@@ -918,6 +938,11 @@ class VideoPlayer(QWidget):
         
         # Emit position changed signal
         self.position_changed.emit(frame)
+        
+        # If we were playing before, resume playback after position change
+        if self.playback_state['playing'] and not self.scrubbing_active:
+            # Use short delay to allow UI to update
+            QTimer.singleShot(50, self.play)
     
     def update_time_label(self):
         """Update the time display label."""
@@ -956,16 +981,19 @@ class VideoPlayer(QWidget):
         super().closeEvent(event)
 
     def play(self):
-        """Start video playback."""
+        """Start video playback with improved state management."""
         if not hasattr(self, 'video_reader') or self.video_reader is None:
             return
         
-        # Always force low quality mode during playback for better performance
+        # Always force low quality mode during playback
         self.scrubbing_mode = "low"
         
-        # Set playback state
+        # Set unified playback state
+        self.playback_state['playing'] = True
         self.playing = True
         self.is_playing_flag = True
+        
+        # Update UI
         self.play_button.setText("Pause")
         self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
         
@@ -1019,27 +1047,23 @@ class VideoPlayer(QWidget):
                     self.consecutive_late_frames = 0
                     next_frame = self.current_frame + 1
                 
-                # Check for segment end condition - FIXED to handle None values safely
-                playing_segment = hasattr(self, 'playback_end_frame') and self.playback_end_frame is not None
+                # Check for segment end condition with improved state handling
+                playing_segment = self.playback_state['segment_mode'] and hasattr(self, 'playback_end_frame') and self.playback_end_frame is not None
                 
                 if playing_segment and next_frame >= self.playback_end_frame:
                     # We've reached the end of the segment
-                    self.pause()
-                    # Make sure we display the exact end frame
                     next_frame = self.playback_end_frame
                     
-                    # Log segment completion
-                    self.logger.info(f"Completed segment playback from {self.playback_start_frame} to {self.playback_end_frame}")
-                    
-                    # Clear playback range settings
+                    # Just clear playback range but keep playing
                     self.playback_start_frame = None
                     self.playback_end_frame = None
                     
-                    # IMPORTANT: Stop the timer to prevent further callbacks
-                    if self.play_timer.isActive():
-                        self.play_timer.stop()
-                    
-                    return
+                    # Only pause if configured not to continue
+                    if not self.continue_after_segment:
+                        self.pause()
+                        if self.play_timer.isActive():
+                            self.play_timer.stop()
+                        return
                 
                 # Otherwise, stay within normal bounds
                 next_frame = min(next_frame, self.frame_count - 1)
@@ -1077,8 +1101,14 @@ class VideoPlayer(QWidget):
             self.play_timer.start(interval)
 
     def pause(self):
-        """Pause video playback."""
+        """Pause video playback with state preservation."""
+        # Update unified state
+        self.playback_state['playing'] = False
         self.is_playing_flag = False
+        self.playing = False
+        
+        # Update UI
+        self.play_button.setText("Play")
         self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         
         # Stop timer
@@ -1133,10 +1163,10 @@ class VideoPlayer(QWidget):
         fps_approx = 1000 / total_ms if total_ms > 0 else 0
         
         metrics_text = (
+            f"Video: {self.fps:.1f} FPS | "  # Add the actual video FPS
+            f"Processing: {fps_approx:.1f} FPS | "  # Clarify this is processing speed
             f"Load: {load_ms:.1f}ms | "
             f"Display: {display_ms:.1f}ms | "
-            f"Total: {total_ms:.1f}ms | "
-            f"~{fps_approx:.1f} FPS | "
             f"Mode: {'Low' if self.scrubbing_mode == 'low' else 'High'}"
         )
         
@@ -1463,3 +1493,106 @@ class VideoPlayer(QWidget):
                 self.frame_cache.cache = OrderedDict(
                     list(self.frame_cache.cache.items())[-self.frame_cache.max_size:]
                 ) 
+
+    def _detect_fallback_fps(self, video_path):
+        """Try multiple methods to detect FPS if main method fails."""
+        try:
+            # Method 1: Try FFmpeg/FFprobe directly
+            if shutil.which('ffprobe'):
+                cmd = [
+                    'ffprobe', '-v', '0', '-of', 'csv=p=0', 
+                    '-select_streams', 'v:0', '-show_entries', 
+                    'stream=r_frame_rate', video_path
+                ]
+                output = subprocess.check_output(cmd).decode().strip()
+                if '/' in output:
+                    num, den = map(int, output.split('/'))
+                    if den > 0:
+                        return num / den
+            
+            # Method 2: Try alternate OpenCV approach
+            cap = cv2.VideoCapture(video_path)
+            if cap.isOpened():
+                # Try to read several frames and calculate FPS
+                frame_times = []
+                for _ in range(10):
+                    start_time = time.time()
+                    ret = cap.grab()
+                    if not ret:
+                        break
+                    frame_times.append(time.time() - start_time)
+                cap.release()
+                
+                if frame_times:
+                    avg_time = sum(frame_times) / len(frame_times)
+                    return 1.0 / avg_time if avg_time > 0 else 25.0
+        
+        except Exception as e:
+            print(f"Error detecting FPS: {e}")
+        
+        # Default fallback
+        return 25.0 
+
+    def on_segment_completed(self):
+        """Handle completion of a segment without stopping playback."""
+        # Only clear segment boundaries
+        self.playback_start_frame = None
+        self.playback_end_frame = None
+        self.playback_state['segment_mode'] = False
+        
+        # DON'T stop playback - continue from current position
+        if self.playback_state['last_playback_mode'] == 'continuous':
+            # Continue playing in continuous mode
+            self.playback_state['continuous_mode'] = True
+        else:
+            # Stop only if we were in a dedicated segment playback
+            self.pause()
+        
+        # Log completion
+        self.logger.info(f"Completed segment playback, continuing in {self.playback_state['last_playback_mode']} mode")
+
+    def set_position(self, frame):
+        """Set position with playback state preservation."""
+        previous_state = self.playback_state['playing']
+        
+        # Calculate jump size 
+        jump_size = abs(frame - self.current_frame)
+        
+        if not self.scrubbing_active:
+            self.scrubbing_active = True
+            self.scrubbing_mode = "low"  # Switch to low quality during scrubbing
+            
+        # Restart the timer - if no scrubbing for 500ms, switch back to high quality
+        self.scrubbing_timer.start(500)
+        
+        # Update current frame
+        self.current_frame = frame
+        
+        # Load the frame
+        self.load_frame(frame)
+        
+        # Emit position changed signal
+        self.position_changed.emit(frame)
+        
+        # If we were playing before, resume playback after position change
+        if previous_state and not self.scrubbing_active:
+            # Use short delay to allow UI to update
+            QTimer.singleShot(50, self.play)
+
+    def set_playback_range(self, start_frame, end_frame):
+        """Set a range of frames to play."""
+        # Always ensure we're in low quality mode for smooth playback
+        self.scrubbing_mode = "low"
+        
+        self.playback_start_frame = start_frame
+        self.playback_end_frame = end_frame
+        self.current_frame = start_frame
+        
+        # Update UI
+        self.seek_slider.setValue(start_frame)
+        self.update_time_label()
+        self.load_frame(start_frame)
+        
+        # Signal
+        self.position_changed.emit(start_frame)
+

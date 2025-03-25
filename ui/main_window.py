@@ -101,6 +101,11 @@ class MainWindow(QMainWindow):
         
         # Install event filter for global shortcuts
         self.installEventFilter(self)
+        
+        # Force low quality on all interactions
+        self.video_player.scrubbing_mode = "low"
+        self.video_player.set_scrubbing_quality("low")
+        self.video_player.quality_lock = True
     
     def create_actions(self):
         """Create application actions."""
@@ -330,7 +335,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to export labels to CSV: {str(e)}")
 
     def play_label_segment(self, start_frame, end_frame):
-        """Play a specific video segment from start to end frame."""
+        """Play a specific video segment with improved state management."""
         # Stop any current playback first
         if self.video_player.is_playing():
             self.video_player.pause()
@@ -350,6 +355,10 @@ class MainWindow(QMainWindow):
         
         # First seek to the start frame before setting playback range
         self.video_player.set_position(start_frame)
+        
+        # Set playback state
+        self.video_player.playback_state['segment_mode'] = True
+        self.video_player.playback_state['last_playback_mode'] = 'segment'
         
         # Then set playback range
         self.video_player.set_playback_range(start_frame, end_frame)
@@ -405,11 +414,15 @@ class MainWindow(QMainWindow):
         # Simply update the timeline without calling viewport()
         self.timeline.update() 
 
-    def toggle_scrubbing_quality(self, enabled):
-        """Toggle between fast and high-quality scrubbing."""
-        if hasattr(self.video_player, 'set_scrubbing_quality'):
-            # Always use low quality
-            self.video_player.set_scrubbing_quality("low")
-            
-            # Update status to inform user
-            self.statusBar().showMessage("Fast scrubbing permanently enabled for best performance", 3000) 
+    def on_timeline_position_changed(self, frame):
+        """Handle timeline position changes with state preservation."""
+        # Get current playing state before changing position
+        was_playing = self.video_player.playback_state['playing']
+        
+        # Update position
+        self.video_player.set_position(frame)
+        
+        # Optionally resume playback if it was playing before
+        if was_playing and self.video_player.current_mode == self.video_player.CHOOSE_MODE:
+            self.video_player.playback_state['continuous_mode'] = True
+            QTimer.singleShot(50, self.video_player.play) 
