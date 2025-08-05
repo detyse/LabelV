@@ -216,37 +216,68 @@ class TimelineWidget(QWidget):
         """Handle paint event to draw the timeline."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.TextAntialiasing)
         
-        # Draw background
-        painter.fillRect(self.rect(), QColor(40, 40, 40))
+        # Draw background with gradient
+        background = QLinearGradient(0, 0, 0, self.height())
+        background.setColorAt(0, QColor(45, 52, 54))
+        background.setColorAt(1, QColor(99, 110, 114))
+        painter.fillRect(self.rect(), background)
         
         if self.frame_count == 0:
-            # No video loaded
-            painter.setPen(QColor(200, 200, 200))
-            painter.drawText(self.rect(), Qt.AlignCenter, "No video loaded")
+            # No video loaded - show helpful message
+            painter.setPen(QColor(220, 221, 225))
+            font = QFont()
+            font.setPointSize(14)
+            painter.setFont(font)
+            
+            # Draw message with icon
+            message = "🎬 请先加载视频文件"
+            hint = "提示：使用 Ctrl+O 打开视频"
+            
+            rect = self.rect()
+            painter.drawText(rect.adjusted(0, -20, 0, 0), Qt.AlignCenter, message)
+            
+            font.setPointSize(10)
+            painter.setFont(font)
+            painter.setPen(QColor(160, 170, 175))
+            painter.drawText(rect.adjusted(0, 20, 0, 0), Qt.AlignCenter, hint)
             return
         
         # Calculate dimensions
         width = self.width()
         height = self.height()
         
-        # Draw timeline track background with gradient for better visual appeal
+        # Draw timeline track background with enhanced gradient
         timeline_rect = QRectF(0, 0, width, self.timeline_height)
         gradient = QLinearGradient(0, 0, 0, self.timeline_height)
-        gradient.setColorAt(0, QColor(70, 70, 70))
-        gradient.setColorAt(1, QColor(50, 50, 50))
+        gradient.setColorAt(0, QColor(85, 98, 112))
+        gradient.setColorAt(0.5, QColor(78, 84, 100))
+        gradient.setColorAt(1, QColor(65, 72, 84))
         painter.fillRect(timeline_rect, gradient)
+        
+        # Add subtle inner shadow
+        shadow_gradient = QLinearGradient(0, 0, 0, 8)
+        shadow_gradient.setColorAt(0, QColor(0, 0, 0, 40))
+        shadow_gradient.setColorAt(1, QColor(0, 0, 0, 0))
+        painter.fillRect(QRectF(0, 0, width, 8), shadow_gradient)
         
         # Draw timeline ruler with grid lines
         self.draw_time_markers(painter, timeline_rect)
         
-        # Draw label tracks
+        # Draw label tracks with enhanced background
         label_area_rect = QRectF(0, self.timeline_height, width, height - self.timeline_height)
-        painter.fillRect(label_area_rect, QColor(45, 45, 45))
+        label_gradient = QLinearGradient(0, self.timeline_height, 0, height)
+        label_gradient.setColorAt(0, QColor(52, 58, 64))
+        label_gradient.setColorAt(1, QColor(44, 50, 56))
+        painter.fillRect(label_area_rect, label_gradient)
         
-        # Draw thin separator line between timeline and label area
-        painter.setPen(QPen(QColor(100, 100, 100), 1))
-        painter.drawLine(0, self.timeline_height, width, self.timeline_height)
+        # Draw enhanced separator line between timeline and label area
+        separator_gradient = QLinearGradient(0, self.timeline_height-1, 0, self.timeline_height+2)
+        separator_gradient.setColorAt(0, QColor(120, 140, 160, 100))
+        separator_gradient.setColorAt(0.5, QColor(160, 180, 200, 200))
+        separator_gradient.setColorAt(1, QColor(80, 100, 120, 100))
+        painter.fillRect(QRectF(0, self.timeline_height-1, width, 3), separator_gradient)
         
         # Draw labels
         self.draw_labels(painter, label_area_rect)
@@ -300,8 +331,11 @@ class TimelineWidget(QWidget):
         start_second_minor = 0
         end_second_minor = min(total_seconds, 86400)  # Cap at 24 hours
         
-        # Draw major time markers
-        painter.setPen(QPen(QColor(200, 200, 200), 1))
+        # Draw major time markers with enhanced styling
+        font = QFont()
+        font.setPointSize(9)
+        font.setWeight(QFont.Bold)
+        painter.setFont(font)
         
         # Use manual iteration with a reasonable step
         current_second = start_second_major
@@ -310,9 +344,14 @@ class TimelineWidget(QWidget):
             frame = int(current_second * self.fps)
             position = self.get_position_for_frame(frame)
             
-            # Draw line
+            # Draw gradient line for major markers
+            line_gradient = QLinearGradient(position, rect.top(), position, rect.top() + rect.height() * 0.6)
+            line_gradient.setColorAt(0, QColor(220, 235, 250, 220))
+            line_gradient.setColorAt(1, QColor(180, 195, 210, 120))
+            
+            painter.setPen(QPen(QBrush(line_gradient), 2))
             painter.drawLine(QPointF(position, rect.top()), 
-                            QPointF(position, rect.top() + rect.height() * 0.5))
+                            QPointF(position, rect.top() + rect.height() * 0.6))
             
             # Format time as MM:SS or HH:MM:SS
             if current_second < 3600:
@@ -325,17 +364,22 @@ class TimelineWidget(QWidget):
                 seconds = int(current_second % 60)
                 time_text = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             
-            # Draw text
-            painter.drawText(
-                QRectF(position - 50, rect.top() + rect.height() * 0.5, 100, rect.height() * 0.5),
-                Qt.AlignCenter, time_text
-            )
+            # Draw text with shadow effect
+            text_rect = QRectF(position - 50, rect.top() + rect.height() * 0.6, 100, rect.height() * 0.4)
+            
+            # Text shadow
+            painter.setPen(QColor(0, 0, 0, 100))
+            painter.drawText(text_rect.adjusted(1, 1, 1, 1), Qt.AlignCenter, time_text)
+            
+            # Main text
+            painter.setPen(QColor(240, 245, 250))
+            painter.drawText(text_rect, Qt.AlignCenter, time_text)
             
             # Move to next major marker
             current_second += major_interval
         
-        # Draw minor time markers (lighter)
-        painter.setPen(QPen(QColor(150, 150, 150, 100), 1))
+        # Draw minor time markers with subtle styling
+        painter.setPen(QPen(QColor(160, 175, 190, 80), 1))
         
         # Use manual iteration for minor markers too
         current_second = start_second_minor
@@ -349,9 +393,14 @@ class TimelineWidget(QWidget):
             frame = int(current_second * self.fps)
             position = self.get_position_for_frame(frame)
             
-            # Draw minor tick
+            # Draw minor tick with gradient
+            minor_gradient = QLinearGradient(position, rect.top(), position, rect.top() + rect.height() * 0.3)
+            minor_gradient.setColorAt(0, QColor(160, 175, 190, 120))
+            minor_gradient.setColorAt(1, QColor(140, 155, 170, 60))
+            
+            painter.setPen(QPen(QBrush(minor_gradient), 1))
             painter.drawLine(QPointF(position, rect.top()), 
-                             QPointF(position, rect.top() + rect.height() * 0.25))
+                             QPointF(position, rect.top() + rect.height() * 0.3))
             
             # Move to next minor marker
             current_second += minor_interval
@@ -524,6 +573,7 @@ class TimelineWidget(QWidget):
         if label_rect.width() > 30:
             font = QFont()
             font.setPointSize(8)
+            font.setFamily("Microsoft YaHei, SimHei, Arial Unicode MS, sans-serif")  # Support Chinese fonts
             painter.setFont(font)
             
             # Format timestamps for start and end frames
@@ -1114,38 +1164,56 @@ class TimelineWidget(QWidget):
             return f"{minutes:02d}:{secs:02d}"
     
     def draw_timeline_scrubber(self, painter, position_x, height):
-        """Draw a more intuitive timeline scrubber handle."""
-        # Draw the vertical line
-        position_pen = QPen(QColor(255, 0, 0), 2)
-        painter.setPen(position_pen)
+        """Draw an enhanced timeline scrubber handle."""
+        # Draw the vertical line with gradient
+        line_gradient = QLinearGradient(position_x, 0, position_x, height)
+        line_gradient.setColorAt(0, QColor(255, 100, 100, 255))
+        line_gradient.setColorAt(0.3, QColor(255, 60, 60, 220))
+        line_gradient.setColorAt(0.7, QColor(255, 40, 40, 180))
+        line_gradient.setColorAt(1, QColor(255, 20, 20, 140))
+        
+        painter.setPen(QPen(QBrush(line_gradient), 3))
         painter.drawLine(QPointF(position_x, 0), QPointF(position_x, height))
         
-        # Draw scrubber handle (circle at top)
-        handle_radius = 6
+        # Draw scrubber handle (enhanced circle at top)
+        handle_radius = 8
         handle_rect = QRectF(
             position_x - handle_radius,
-            0, 
+            2, 
             handle_radius * 2,
             handle_radius * 2
         )
         
-        # Draw glow effect
-        gradient = QRadialGradient(
-            position_x,
-            handle_radius,
-            handle_radius * 2
-        )
-        gradient.setColorAt(0, QColor(255, 80, 80, 180))
-        gradient.setColorAt(1, QColor(255, 0, 0, 0))
+        # Draw outer glow effect
+        outer_glow = QRadialGradient(position_x, 2 + handle_radius, handle_radius * 3)
+        outer_glow.setColorAt(0, QColor(255, 100, 100, 100))
+        outer_glow.setColorAt(0.5, QColor(255, 60, 60, 50))
+        outer_glow.setColorAt(1, QColor(255, 0, 0, 0))
         
-        painter.setBrush(QBrush(gradient))
+        painter.setBrush(QBrush(outer_glow))
         painter.setPen(Qt.NoPen)
-        painter.drawEllipse(handle_rect.adjusted(-handle_radius, -handle_radius/2, handle_radius, handle_radius/2))
+        painter.drawEllipse(QRectF(position_x - handle_radius * 2, 2 - handle_radius, 
+                                  handle_radius * 4, handle_radius * 4))
         
-        # Draw handle
-        painter.setBrush(QColor(255, 0, 0))
-        painter.setPen(QPen(QColor(200, 200, 200), 1))
+        # Draw handle background gradient
+        handle_gradient = QRadialGradient(position_x, 2 + handle_radius, handle_radius)
+        handle_gradient.setColorAt(0, QColor(255, 120, 120))
+        handle_gradient.setColorAt(0.7, QColor(255, 60, 60))
+        handle_gradient.setColorAt(1, QColor(200, 40, 40))
+        
+        painter.setBrush(QBrush(handle_gradient))
+        painter.setPen(QPen(QColor(255, 255, 255, 200), 2))
         painter.drawEllipse(handle_rect)
+        
+        # Draw inner highlight
+        highlight_rect = QRectF(position_x - 3, 4, 6, 6)
+        highlight_gradient = QRadialGradient(position_x, 7, 3)
+        highlight_gradient.setColorAt(0, QColor(255, 255, 255, 150))
+        highlight_gradient.setColorAt(1, QColor(255, 255, 255, 0))
+        
+        painter.setBrush(QBrush(highlight_gradient))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(highlight_rect)
     
     def get_next_label_number(self, category="default"):
         """Get the next sequential number for a label in this category."""
@@ -1245,6 +1313,17 @@ class TimelineWidget(QWidget):
         for i, label in enumerate(self.labels):
             if label.id == label_id:
                 self.labels[i].name = new_name
+                # Force a repaint of the timeline
+                self.update()
+                break
+    
+    @Slot(str, object)
+    def update_label_color(self, label_id, new_color):
+        """Update the color of a label on the timeline."""
+        # Find the label with the given ID and update its color
+        for i, label in enumerate(self.labels):
+            if label.id == label_id:
+                self.labels[i].color = new_color
                 # Force a repaint of the timeline
                 self.update()
                 break

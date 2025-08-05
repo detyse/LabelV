@@ -646,13 +646,20 @@ class VideoPlayer(QWidget):
         logger = logging.getLogger('video_player')
         logger.setLevel(logging.DEBUG)
         
+        # Create logs directory in user's home or temp directory
+        import tempfile
+        import os
+        log_dir = os.path.join(tempfile.gettempdir(), 'LabelV')
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, 'video_player.log')
+        
         # Create file handler
-        file_handler = logging.FileHandler('video_player.log')
-        file_handler.setLevel(logging.WARNING)
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.ERROR)  # Only log errors to file
         
         # Create console handler
         console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.WARNING)
+        console_handler.setLevel(logging.ERROR)  # Only show errors in console
         
         # Create formatter
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -1026,6 +1033,9 @@ class VideoPlayer(QWidget):
             else:
                 next_frame = self.current_frame + 1
             
+            # Double check bounds to prevent warnings
+            next_frame = max(0, min(next_frame, self.frame_count - 1))
+            
             # Update current frame
             self.current_frame = next_frame
             
@@ -1053,6 +1063,10 @@ class VideoPlayer(QWidget):
                                 QTimer.singleShot(0, lambda f=future_frame: self.preload_frame_direct(f))
                         except Exception as e:
                             print(f"Error scheduling preload for frame {future_frame}: {e}")
+        else:
+            # Reached end of video, stop playback if playing
+            if self.playing:
+                self.pause()
     
     @Slot()
     def previous_frame(self):
@@ -1160,7 +1174,12 @@ class VideoPlayer(QWidget):
                 self.playback_speed = 1.0
             
             # Calculate interval based on FPS and playback speed
-            interval = int(1000 / (self.fps * self.playback_speed))
+            if self.playback_speed > 1.0:
+                # For high speeds, use base FPS interval since we skip frames in logic
+                interval = int(1000 / self.fps) if self.fps > 0 else 33
+            else:
+                # For normal/slow speeds, adjust interval normally
+                interval = int(1000 / (self.fps * self.playback_speed)) if self.fps > 0 else 33
             
             # Ensure minimum interval to prevent UI freezing
             interval = max(10, interval)
@@ -1188,16 +1207,37 @@ class VideoPlayer(QWidget):
                     # Update consecutive late frames counter
                     self.consecutive_late_frames += 1
                     
-                    # If consistently behind, reduce effective playback speed
-                    if self.consecutive_late_frames > 5:
-                        self.logger.warning("Performance issue: Reducing playback timer interval")
-                        new_interval = self.play_timer.interval() * 1.2
+                    # If consistently behind, reduce effective playback speed (less frequent warnings)
+                    if self.consecutive_late_frames > 10:  # Increased threshold
+                        self.logger.info("Performance: Adjusting playback timer interval")  # Changed to info level
+                        new_interval = min(self.play_timer.interval() * 1.1, 200)  # Smaller adjustment, cap at 200ms
                         self.play_timer.setInterval(int(new_interval))
                         self.consecutive_late_frames = 0
                 else:
                     # Running on schedule, reset counter
                     self.consecutive_late_frames = 0
-                    next_frame = self.current_frame + 1
+                    
+                    # Apply proper playback speed logic
+                    if self.playback_speed > 1.0:
+                        # For speeds > 1.0, skip frames based on speed
+                        frames_to_advance = round(self.playback_speed)
+                        next_frame = self.current_frame + frames_to_advance
+                    elif self.playback_speed < 1.0:
+                        # For speeds < 1.0, only advance every N timer calls
+                        if not hasattr(self, '_slow_playback_counter'):
+                            self._slow_playback_counter = 0
+                        
+                        self._slow_playback_counter += 1
+                        calls_per_frame = round(1.0 / self.playback_speed)
+                        
+                        if self._slow_playback_counter >= calls_per_frame:
+                            next_frame = self.current_frame + 1
+                            self._slow_playback_counter = 0
+                        else:
+                            next_frame = self.current_frame  # Stay on current frame
+                    else:
+                        # Normal speed (1.0x)
+                        next_frame = self.current_frame + 1
                 
                 # Check for segment end condition with improved state handling
                 playing_segment = self.playback_state['segment_mode'] and hasattr(self, 'playback_end_frame') and self.playback_end_frame is not None
@@ -1206,19 +1246,25 @@ class VideoPlayer(QWidget):
                     # We've reached the end of the segment
                     next_frame = self.playback_end_frame
                     
-                    # Just clear playback range but keep playing
+                    # Clear segment mode
+                    self.playback_state['segment_mode'] = False
                     self.playback_start_frame = None
                     self.playback_end_frame = None
                     
-                    # Only pause if configured not to continue
-                    if not self.continue_after_segment:
-                        self.pause()
-                        if self.play_timer.isActive():
-                            self.play_timer.stop()
-                        return
+                    # Always pause after segment playback in view mode
+                    self.pause()
+                    if self.play_timer.isActive():
+                        self.play_timer.stop()
+                    return
                 
-                # Otherwise, stay within normal bounds
-                next_frame = min(next_frame, self.frame_count - 1)
+                # Check if we've reached the end of the video
+                if next_frame >= self.frame_count - 1:
+                    next_frame = self.frame_count - 1
+                    # Stop playback when reaching the end
+                    self.pause()
+                    if self.play_timer.isActive():
+                        self.play_timer.stop()
+                    return
                 
                 # Update current frame only if it changed
                 if next_frame != self.current_frame:
@@ -1299,7 +1345,12 @@ class VideoPlayer(QWidget):
             if self.is_playing_flag and self.play_timer.isActive():
                 self.play_timer.stop()
                 # Adjust timer interval based on speed
-                interval = int(1000 / (self.fps * self.playback_speed))
+                if self.playback_speed > 1.0:
+                    # For high speeds, use base FPS interval since we skip frames in logic
+                    interval = int(1000 / self.fps) if self.fps > 0 else 33
+                else:
+                    # For normal/slow speeds, adjust interval normally
+                    interval = int(1000 / (self.fps * self.playback_speed)) if self.fps > 0 else 33
                 # Ensure we have at least 10ms interval to prevent UI freeze
                 interval = max(10, interval)
                 self.play_timer.start(interval)
