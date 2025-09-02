@@ -64,7 +64,7 @@ The application includes playback speed control ranging from 0.25x to 8.0x norma
 This allows for:
 - Slow-motion analysis of critical moments (0.25x, 0.5x)
 - Normal playback (1.0x)
-- Fast review of lengthy content (1.5x, 2.0x, 4.0x, 8.0x)
+- Fast review of lengthy content (1.5x, 2.0x, 4.0x, 8.0x)  (BUG)
 
 Choose the appropriate speed from the dropdown in the video player controls.
 
