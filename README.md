@@ -14,22 +14,7 @@ A video labeling tool built with PySide6 that allows you to mark and annotate pe
 
 ## Installation
 
-1. Clone this repository:
-   ```
-   git clone https://github.com/yourusername/video-label-tool.git
-   cd video-label-tool
-   ```
-
-2. Create a virtual environment (optional but recommended):
-   ```
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. Install the required dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
+There is a requirements.txt file.
 
 ## Usage
 
