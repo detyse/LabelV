@@ -73,6 +73,7 @@ class LabelPanel(QWidget):
     label_selected = Signal(str)  # Label ID
     label_name_changed = Signal(str, str)  # old_id, new_name
     label_color_changed = Signal(str, object)  # label_id, QColor
+    label_category_changed = Signal(str, str)  # label_id, category key
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -97,6 +98,9 @@ class LabelPanel(QWidget):
             "text": QColor(32, 178, 170, 180)      # Light Sea Green
         }
         
+        self.selected_category_key = "default"
+        self._category_change_in_progress = False
+
         # Initialize label properties
         self.current_label_id = None
         self.label_index = "1"  # Default label index
@@ -108,6 +112,8 @@ class LabelPanel(QWidget):
         # Set up UI
         self.setup_ui()
         
+        if hasattr(self, "category_combo"):
+            self.selected_category_key = self.category_combo.currentData() or "default"
         # Set up auto-save timer for real-time updates
         self.update_timer = QTimer()
         self.update_timer.setSingleShot(True)
@@ -627,6 +633,7 @@ class LabelPanel(QWidget):
         """Enable or disable the label editor."""
         self.name_edit.setEnabled(enabled)
         self.color_button.setEnabled(enabled)
+        self.category_combo.setEnabled(enabled)
         self.description_edit.setEnabled(enabled)
         self.start_frame_label.setEnabled(enabled)
         self.end_frame_label.setEnabled(enabled)
@@ -635,6 +642,25 @@ class LabelPanel(QWidget):
         self.remove_button.setEnabled(enabled)
         self.duplicate_button.setEnabled(enabled)
     
+    def on_category_changed(self, index):
+        """Handle category changes from the combo box."""
+        category = self.category_combo.itemData(index)
+        if category is None:
+            return
+        self.selected_category_key = category
+        default_color = self.category_colors.get(category)
+        self.update_timer.stop()
+        self._category_change_in_progress = True
+        try:
+            if default_color:
+                self.color_button.blockSignals(True)
+                self.color_button.setColor(default_color)
+                self.color_button.blockSignals(False)
+            if self.current_label_id:
+                self.label_category_changed.emit(self.current_label_id, category)
+                self.on_label_property_changed()
+        finally:
+            self._category_change_in_progress = False
     def clear(self):
         """Clear all labels."""
         self.label_list.clear()
@@ -652,13 +678,15 @@ class LabelPanel(QWidget):
         # Get the next number based on existing labels
         count = self.label_list.count() + 1
         
+        default_color = self.category_colors.get(self.selected_category_key, QColor(255, 165, 0, 180))
         label_data = {
             "id": label_id,
             "name": f"Label {count}",
             "start_frame": 0,
             "end_frame": 0,
-            "color": [255, 165, 0, 180],  # Orange with transparency
-            "category": "default",  # Keep for compatibility
+            "color": [default_color.red(), default_color.green(), default_color.blue(), default_color.alpha()],
+            "category": self.selected_category_key,
+            "color_is_custom": False,
             "description": ""
         }
         
@@ -705,57 +733,48 @@ class LabelPanel(QWidget):
         """Handle changes to label properties."""
         if not self.current_label_id:
             return
-            
-        # Get the action name from the text field
+        
         action_name = self.name_edit.text().strip()
-        
-        # Format the full name with index prefix
         full_name = f"{self.label_index}. {action_name}" if action_name else f"{self.label_index}."
+        category = self.category_combo.currentData() or "default"
+        color = self.color_button.color()
+        default_color = self.category_colors.get(category)
+        if self._category_change_in_progress:
+            color_is_custom = False
+        else:
+            color_is_custom = not (default_color and color == default_color)
         
-        # Create updated label data
         label_data = {
             "id": self.current_label_id,
             "name": full_name,
-            "color": [
-                self.color_button.color().red(),
-                self.color_button.color().green(),
-                self.color_button.color().blue(),
-                self.color_button.color().alpha()
-            ],
+            "color": [color.red(), color.green(), color.blue(), color.alpha()],
+            "category": category,
+            "color_is_custom": color_is_custom,
             "description": self.description_edit.toPlainText()
         }
         
-        # Update list item text
         for i in range(self.label_list.count()):
             item = self.label_list.item(i)
             if item.data(Qt.UserRole) == self.current_label_id:
                 item.setText(full_name)
-                
-                # Set color of item
                 pixmap = QPixmap(16, 16)
                 pixmap.fill(Qt.transparent)
-                
                 painter = QPainter(pixmap)
-                painter.setBrush(QBrush(self.color_button.color()))
+                painter.setBrush(QBrush(color))
                 painter.setPen(Qt.black)
                 painter.drawRect(0, 0, 15, 15)
                 painter.end()
-                
                 item.setIcon(QIcon(pixmap))
+                item.setData(Qt.UserRole + 1, category)
                 break
         
-        # Emit signal to update label
         self.label_updated.emit(label_data)
+        if not self._category_change_in_progress:
+            self.label_color_changed.emit(self.current_label_id, color)
         
-        # Emit color change signal
-        self.label_color_changed.emit(self.current_label_id, self.color_button.color())
-        
-        # Auto-add new label to templates
         self.auto_add_label_to_templates(full_name)
-        
-        # Add this line after updating the label in your data structure
         self.label_name_changed.emit(self.current_label_id, full_name)
-    
+
     @Slot(QListWidgetItem, QListWidgetItem)
     def on_label_selected(self, current, previous):
         """Handle selection of a label from the list."""
@@ -812,6 +831,7 @@ class LabelPanel(QWidget):
         
         item = QListWidgetItem(name)
         item.setData(Qt.UserRole, label_id)
+        item.setData(Qt.UserRole + 1, label_data.get("category", "default"))
         
         # Set icon with label color
         pixmap = QPixmap(16, 16)
@@ -843,6 +863,7 @@ class LabelPanel(QWidget):
         color = label_data.get("color", [255, 165, 0, 180])
         
         item.setText(name)
+        item.setData(Qt.UserRole + 1, label_data.get("category", "default"))
         
         # Update icon with new color
         pixmap = QPixmap(16, 16)
@@ -859,6 +880,17 @@ class LabelPanel(QWidget):
     def update_label_data(self, label_data):
         """Update the editor with label data."""
         self.current_label_id = label_data["id"]
+        category_key = label_data.get("category", "default")
+        self.selected_category_key = category_key
+        if hasattr(self, "category_combo"):
+            self.category_combo.blockSignals(True)
+            combo_index = self.category_combo.findData(category_key)
+            if combo_index >= 0:
+                self.category_combo.setCurrentIndex(combo_index)
+            else:
+                self.category_combo.setCurrentIndex(0)
+                self.selected_category_key = self.category_combo.currentData() or "default"
+            self.category_combo.blockSignals(False)
         
         # Parse label name - maintain the index format "1. Action"
         name = label_data.get("name", "")
@@ -889,7 +921,9 @@ class LabelPanel(QWidget):
                     self.label_index = "1"
         
         color_rgba = label_data.get("color", [255, 165, 0, 180])
+        self.color_button.blockSignals(True)
         self.color_button.setColor(QColor(*color_rgba))
+        self.color_button.blockSignals(False)
         
         self.description_edit.setPlainText(label_data.get("description", ""))
         
@@ -924,6 +958,10 @@ class LabelPanel(QWidget):
         self.remove_button.setEnabled(True)
         self.duplicate_button.setEnabled(True)
     
+    def current_category(self):
+        """Return the currently selected category key."""
+        return self.selected_category_key
+
     def update_frame_range(self, label_id, start_frame, end_frame):
         """Update the displayed frame range for a label."""
         if label_id == self.current_label_id:
@@ -942,7 +980,16 @@ class LabelPanel(QWidget):
         self.current_label_id = None
         self.name_edit.clear()
         self.description_edit.clear()
+        if hasattr(self, "category_combo"):
+            self.category_combo.blockSignals(True)
+            default_index = self.category_combo.findData("default")
+            if default_index >= 0:
+                self.category_combo.setCurrentIndex(default_index)
+            self.category_combo.blockSignals(False)
+        self.selected_category_key = "default"
+        self.color_button.blockSignals(True)
         self.color_button.setColor(QColor(255, 165, 0, 180))  # Reset to default color
+        self.color_button.blockSignals(False)
         self.start_frame_label.setText("0 (00:00:00)")
         self.end_frame_label.setText("0 (00:00:00)")
         self.set_editor_enabled(False) 

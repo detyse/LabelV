@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
         self.video_player = VideoPlayer()
         self.timeline = TimelineWidget()
         self.label_panel = LabelPanel()
+        self.timeline.set_category_colors(self.label_panel.category_colors)
         
         # Set up central widget with splitter for better layout
         self.setup_main_layout()
@@ -158,6 +159,7 @@ class MainWindow(QMainWindow):
         
         # Connect label color change signal to timeline
         self.label_panel.label_color_changed.connect(self.timeline.update_label_color)
+        self.label_panel.label_category_changed.connect(self.timeline.update_label_category)
         
         # Add this connection
         self.label_panel.label_template_list.itemClicked.connect(
