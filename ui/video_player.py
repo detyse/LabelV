@@ -640,6 +640,10 @@ class VideoPlayer(QWidget):
         self.metrics_update_timer = QTimer(self)
         self.metrics_update_timer.timeout.connect(self.update_metrics)
         self.metrics_update_timer.start(500)  # Update every 500ms
+        
+        # 添加倍速播放测试相关属性
+        self.speed_test_start_time = None
+        self.speed_test_start_frame = None
     
     def _setup_logger(self):
         """Set up detailed logging for video player."""
@@ -1037,7 +1041,13 @@ class VideoPlayer(QWidget):
             next_frame = max(0, min(next_frame, self.frame_count - 1))
             
             # Update current frame
+            old_frame = self.current_frame
             self.current_frame = next_frame
+            
+            # 调试信息：显示实际的帧跳跃
+            if self.playback_speed != 1.0:
+                frame_jump = next_frame - old_frame
+                print(f"Manual next_frame: Speed {self.playback_speed}x, jumped {frame_jump} frames (from {old_frame} to {next_frame})")
             
             # Update UI without triggering another set_position call
             self.seek_slider.blockSignals(True)
@@ -1167,22 +1177,30 @@ class VideoPlayer(QWidget):
         self.last_frame_time = time.time()
         self.consecutive_late_frames = 0
         
+        # 启动倍速测试计时
+        self.speed_test_start_time = time.time()
+        self.speed_test_start_frame = self.current_frame
+        print(f"Starting speed test: {self.playback_speed}x at frame {self.current_frame}")
+        
         # Start playback timer if not running
         if not self.play_timer.isActive():
             # Double-check that playback speed is reasonable
             if self.playback_speed <= 0:
                 self.playback_speed = 1.0
             
-            # Calculate interval based on FPS and playback speed
-            if self.playback_speed > 1.0:
-                # For high speeds, use base FPS interval since we skip frames in logic
-                interval = int(1000 / self.fps) if self.fps > 0 else 33
-            else:
-                # For normal/slow speeds, adjust interval normally
-                interval = int(1000 / (self.fps * self.playback_speed)) if self.fps > 0 else 33
+            # 修复：统一的定时器间隔计算逻辑
+            # 所有倍速都使用基础FPS间隔，通过帧跳跃实现倍速效果
+            base_interval = int(1000 / self.fps) if self.fps > 0 else 33
             
-            # Ensure minimum interval to prevent UI freezing
-            interval = max(10, interval)
+            # 对于慢速播放，可以适当增加间隔来节省资源
+            if self.playback_speed < 0.5:
+                interval = int(base_interval / self.playback_speed)
+            else:
+                # 对于正常速度和高速播放，使用基础间隔
+                interval = base_interval
+            
+            # 确保合理的间隔范围
+            interval = max(10, min(interval, 500))
             
             # Log the playback settings for debugging
             self.logger.info(f"Starting playback: speed={self.playback_speed}, interval={interval}ms, quality={self.scrubbing_mode}")
@@ -1191,37 +1209,30 @@ class VideoPlayer(QWidget):
             def adaptive_next_frame():
                 now = time.time()
                 elapsed = now - self.last_frame_time
-                target_interval = 1.0/(self.fps * self.playback_speed) if self.fps > 0 else 0.033
+                # 修复：使用与定时器间隔一致的目标间隔计算
+                target_interval = (base_interval / 1000.0) if base_interval > 0 else 0.033
                 
-                # Check if we're running behind schedule
-                if elapsed > target_interval * 1.5:
-                    # Calculate how many frames to skip to catch up
-                    skip_count = int(elapsed // target_interval)
-                    
-                    # Limit maximum skip to avoid huge jumps
-                    skip_count = min(skip_count, 5)
-                    
-                    # Calculate next frame with skip
+                # 修复：简化性能检测，避免干扰倍速播放
+                # 只有在极端情况下才跳帧，不调整定时器间隔
+                if elapsed > target_interval * 3.0:  # 更宽松的阈值
+                    # 只在严重延迟时才跳帧
+                    skip_count = min(int(elapsed // target_interval), 2)  # 限制跳帧数
                     next_frame = self.current_frame + skip_count
                     
-                    # Update consecutive late frames counter
+                    # 记录但不自动调整定时器间隔
                     self.consecutive_late_frames += 1
-                    
-                    # If consistently behind, reduce effective playback speed (less frequent warnings)
-                    if self.consecutive_late_frames > 10:  # Increased threshold
-                        self.logger.info("Performance: Adjusting playback timer interval")  # Changed to info level
-                        new_interval = min(self.play_timer.interval() * 1.1, 200)  # Smaller adjustment, cap at 200ms
-                        self.play_timer.setInterval(int(new_interval))
+                    if self.consecutive_late_frames > 20:  # 更高阈值
+                        print(f"Performance warning: consistently behind schedule at {self.playback_speed}x speed")
                         self.consecutive_late_frames = 0
                 else:
                     # Running on schedule, reset counter
                     self.consecutive_late_frames = 0
                     
-                    # Apply proper playback speed logic
+                    # 修复：统一帧推进逻辑，与next_frame方法保持一致
                     if self.playback_speed > 1.0:
-                        # For speeds > 1.0, skip frames based on speed
-                        frames_to_advance = round(self.playback_speed)
-                        next_frame = self.current_frame + frames_to_advance
+                        # For speeds > 1.0, skip frames based on speed (与next_frame一致)
+                        frames_to_skip = round(self.playback_speed) - 1
+                        next_frame = self.current_frame + 1 + frames_to_skip
                     elif self.playback_speed < 1.0:
                         # For speeds < 1.0, only advance every N timer calls
                         if not hasattr(self, '_slow_playback_counter'):
@@ -1268,7 +1279,12 @@ class VideoPlayer(QWidget):
                 
                 # Update current frame only if it changed
                 if next_frame != self.current_frame:
+                    frame_jump = next_frame - self.current_frame
                     self.current_frame = next_frame
+                    
+                    # 调试信息：显示实际的帧跳跃
+                    if self.playback_speed != 1.0:
+                        print(f"Speed {self.playback_speed}x: jumped {frame_jump} frames (from {self.current_frame-frame_jump} to {self.current_frame})")
                     
                     # Update UI without triggering another set_position call
                     self.seek_slider.blockSignals(True)
@@ -1300,6 +1316,26 @@ class VideoPlayer(QWidget):
 
     def pause(self):
         """Pause video playback with state preservation."""
+        # 计算并显示倍速测试结果
+        if (hasattr(self, 'speed_test_start_time') and self.speed_test_start_time and 
+            hasattr(self, 'speed_test_start_frame') and self.speed_test_start_frame is not None):
+            elapsed_time = time.time() - self.speed_test_start_time
+            frames_played = self.current_frame - self.speed_test_start_frame
+            
+            if elapsed_time > 0 and frames_played > 0:
+                actual_fps = frames_played / elapsed_time
+                expected_fps = self.fps * self.playback_speed
+                speed_ratio = actual_fps / self.fps if self.fps > 0 else 0
+                
+                print(f"Speed test result:")
+                print(f"  Expected speed: {self.playback_speed}x ({expected_fps:.2f} FPS)")
+                print(f"  Actual speed: {speed_ratio:.2f}x ({actual_fps:.2f} FPS)")
+                print(f"  Efficiency: {(actual_fps/expected_fps)*100:.1f}%" if expected_fps > 0 else "N/A")
+                
+                # 重置测试数据
+                self.speed_test_start_time = None
+                self.speed_test_start_frame = None
+        
         # Update unified state
         self.playback_state['playing'] = False
         self.is_playing_flag = False
@@ -1344,16 +1380,23 @@ class VideoPlayer(QWidget):
             # Update timer interval if playing
             if self.is_playing_flag and self.play_timer.isActive():
                 self.play_timer.stop()
-                # Adjust timer interval based on speed
-                if self.playback_speed > 1.0:
-                    # For high speeds, use base FPS interval since we skip frames in logic
-                    interval = int(1000 / self.fps) if self.fps > 0 else 33
+                
+                # 修复：统一的定时器间隔计算逻辑
+                # 所有倍速都使用基础FPS间隔，通过帧跳跃实现倍速效果
+                base_interval = int(1000 / self.fps) if self.fps > 0 else 33
+                
+                # 对于慢速播放，可以适当增加间隔来节省资源
+                if self.playback_speed < 0.5:
+                    interval = int(base_interval / self.playback_speed)
                 else:
-                    # For normal/slow speeds, adjust interval normally
-                    interval = int(1000 / (self.fps * self.playback_speed)) if self.fps > 0 else 33
-                # Ensure we have at least 10ms interval to prevent UI freeze
-                interval = max(10, interval)
+                    # 对于正常速度和高速播放，使用基础间隔
+                    interval = base_interval
+                
+                # 确保合理的间隔范围
+                interval = max(10, min(interval, 500))
                 self.play_timer.start(interval)
+                
+                print(f"Speed changed to {speed}x, timer interval: {interval}ms")
         except ValueError:
             # If speed text couldn't be converted to float
             pass
