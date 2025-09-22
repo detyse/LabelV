@@ -262,6 +262,19 @@ class LabelPanel(QWidget):
         self.name_edit.textChanged.connect(self.delayed_update)
         editor_layout.addRow("名称:", self.name_edit)
         
+        # Category selector
+        self.category_combo = QComboBox()
+        self.category_combo.setToolTip("选择标签类别")
+        
+        # Add categories to combo box
+        for key, display_name in self.categories.items():
+            self.category_combo.addItem(display_name, key)
+        
+        # Set default selection
+        self.category_combo.setCurrentIndex(0)
+        self.category_combo.currentIndexChanged.connect(self.on_category_changed)
+        editor_layout.addRow("类别:", self.category_combo)
+        
         # Color selector row
         color_layout = QHBoxLayout()
         self.color_button = ColorButton()

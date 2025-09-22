@@ -45,6 +45,12 @@ class MainWindow(QMainWindow):
         
         self.settings = QSettings("LabelV", "VideoLabelTool")
         
+        # Current project data - 初始化在其他组件之前
+        self.current_video_path = None
+        self.current_project_path = None
+        self.labels = []
+        self.has_unsaved_changes = False
+        
         # 撤销/重做系统
         self.undo_stack = []
         self.redo_stack = []
@@ -71,12 +77,6 @@ class MainWindow(QMainWindow):
         self.create_actions()
         self.create_toolbar()
         self.create_status_bar()
-        
-        # Current project data
-        self.current_video_path = None
-        self.current_project_path = None
-        self.labels = []
-        self.has_unsaved_changes = False
         
         # Override the timeline's keyPressEvent with our custom handler
         self.timeline.keyPressEvent = lambda event: self.handle_timeline_key_press(event)
