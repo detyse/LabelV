@@ -1011,21 +1011,11 @@ class VideoPlayer(QWidget):
     @Slot()
     def toggle_play(self):
         """Toggle play/pause state."""
-        if self.playing:
-            self.playing = False
-            self.play_timer.stop()
-            self.play_button.setText("Play")
-            self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        if self.is_playing():
+            self.pause()
         else:
-            self.playing = True
-            # Calculate interval based on FPS and playback speed
-            interval = int(1000 / (self.fps * self.playback_speed)) if self.fps > 0 else 33
-            # Ensure minimum interval to prevent UI freezing
-            interval = max(10, interval)
-            self.play_timer.start(interval)
-            self.play_button.setText("Pause")
-            self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
-    
+            self.play()
+
     @Slot()
     def next_frame(self):
         """Move to the next frame."""
@@ -1377,8 +1367,17 @@ class VideoPlayer(QWidget):
             speed = float(speed_text.rstrip('x'))
             self.playback_speed = speed
             
+            if hasattr(self, 'speed_combo'):
+                combo_text = f"{speed:.1f}x"
+                if self.speed_combo.currentText() != combo_text:
+                    idx = self.speed_combo.findText(combo_text)
+                    if idx >= 0:
+                        self.speed_combo.blockSignals(True)
+                        self.speed_combo.setCurrentIndex(idx)
+                        self.speed_combo.blockSignals(False)
+            
             # Update timer interval if playing
-            if self.is_playing_flag and self.play_timer.isActive():
+            if self.play_timer.isActive():
                 self.play_timer.stop()
                 
                 # 修复：统一的定时器间隔计算逻辑

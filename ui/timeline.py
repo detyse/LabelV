@@ -124,6 +124,7 @@ class TimelineWidget(QWidget):
     label_double_clicked = Signal(str)  # Label ID
     label_playback_requested = Signal(int, int)  # start_frame, end_frame
     label_created = Signal(object)  # Emit the new label data
+    label_removed = Signal(str)  # Label ID removed from timeline
 
     # States for mouse interactions
     NONE = 0
@@ -655,7 +656,14 @@ class TimelineWidget(QWidget):
         if "color_is_custom" in label_data:
             label.color_is_custom = bool(label_data["color_is_custom"])
         else:
-            label.color_is_custom = bool(label_data.get("color"))
+            default_color = None
+            if self.category_colors:
+                category_key = getattr(label, 'category', 'default') or 'default'
+                default_color = self.category_colors.get(category_key) or self.category_colors.get('default')
+            if default_color is not None:
+                label.color_is_custom = QColor(label.color) != QColor(default_color)
+            else:
+                label.color_is_custom = False
 
         # Apply category color when appropriate
         self.apply_category_color(label)
@@ -715,6 +723,7 @@ class TimelineWidget(QWidget):
                     self.hover_label_idx -= 1
 
                 self.update()
+                self.label_removed.emit(label_id)
                 return
 
     @Slot(str)

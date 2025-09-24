@@ -150,9 +150,11 @@ class MainWindow(QMainWindow):
         
         # Connect label playback request to player
         self.timeline.label_playback_requested.connect(self.play_label_segment)
+        self.label_panel.label_playback_requested.connect(self.play_label_segment)
         
         # Connect signals for timeline-label panel synchronization
         self.timeline.label_created.connect(self.on_label_created)
+        self.timeline.label_removed.connect(self.label_panel.on_timeline_label_removed)
         
         # Connect label name change signal to timeline
         self.label_panel.label_name_changed.connect(self.timeline.update_label_name)

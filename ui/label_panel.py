@@ -74,6 +74,7 @@ class LabelPanel(QWidget):
     label_name_changed = Signal(str, str)  # old_id, new_name
     label_color_changed = Signal(str, object)  # label_id, QColor
     label_category_changed = Signal(str, str)  # label_id, category key
+    label_playback_requested = Signal(int, int)  # start_frame, end_frame
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -221,8 +222,11 @@ class LabelPanel(QWidget):
             }
         """)
         self.label_list.currentItemChanged.connect(self.on_label_selected)
+        self.label_list.itemClicked.connect(self.on_label_item_clicked)
+        self.label_list.itemDoubleClicked.connect(self.on_label_item_double_clicked)
+        self.label_list.itemActivated.connect(self.on_label_item_double_clicked)
         self.label_list.setMinimumHeight(150)
-        self.label_list.setToolTip("双击标签播放对应片段")
+        self.label_list.setToolTip("点击标签播放对应片段")
         list_layout.addWidget(self.label_list)
         
         layout.addWidget(list_group)
@@ -741,6 +745,28 @@ class LabelPanel(QWidget):
                 self.label_list.setCurrentRow(new_row)
             self.update_label_count()
     
+    @Slot(str)
+    def on_timeline_label_removed(self, label_id):
+        """Synchronize list when a label is removed from the timeline."""
+        if not label_id:
+            return
+        removed_row = None
+        for i in range(self.label_list.count()):
+            item = self.label_list.item(i)
+            if item.data(Qt.UserRole) == label_id:
+                self.label_list.takeItem(i)
+                removed_row = i
+                break
+        if removed_row is None:
+            return
+        was_current = (self.current_label_id == label_id)
+        if was_current:
+            self.clear_editor()
+        if self.label_list.count() > 0:
+            next_row = min(removed_row, self.label_list.count() - 1)
+            self.label_list.setCurrentRow(next_row)
+        self.update_label_count()
+    
     @Slot()
     def on_label_property_changed(self):
         """Handle changes to label properties."""
@@ -823,6 +849,25 @@ class LabelPanel(QWidget):
                 break
             parent = parent.parent()
     
+    @Slot(QListWidgetItem)
+    def on_label_item_clicked(self, item):
+        """Play the corresponding segment when a label is clicked."""
+        if not item:
+            return
+        label_id = item.data(Qt.UserRole)
+        timeline = self._get_timeline()
+        if timeline is None:
+            return
+        for label in getattr(timeline, 'labels', []):
+            if label.id == label_id:
+                self.label_playback_requested.emit(label.start_frame, label.end_frame)
+                break
+
+    @Slot(QListWidgetItem)
+    def on_label_item_double_clicked(self, item):
+        """Play the corresponding segment when a label is activated."""
+        self.on_label_item_clicked(item)
+
     def add_label_to_list(self, label_data):
         """Add a label to the list widget."""
         # Update the name format when adding new labels
@@ -974,6 +1019,15 @@ class LabelPanel(QWidget):
     def current_category(self):
         """Return the currently selected category key."""
         return self.selected_category_key
+
+    def _get_timeline(self):
+        """Locate the timeline widget from the parent hierarchy."""
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'timeline'):
+                return parent.timeline
+            parent = parent.parent()
+        return None
 
     def update_frame_range(self, label_id, start_frame, end_frame):
         """Update the displayed frame range for a label."""
