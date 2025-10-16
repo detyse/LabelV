@@ -1818,6 +1818,12 @@ class VideoPlayer(QWidget):
         
         # Update current frame
         self.current_frame = frame
+
+        # Keep seek slider synchronized with current frame
+        if hasattr(self, 'seek_slider'):
+            self.seek_slider.blockSignals(True)
+            self.seek_slider.setValue(frame)
+            self.seek_slider.blockSignals(False)
         
         # Load the frame
         self.load_frame(frame)

@@ -161,7 +161,8 @@ class MainWindow(QMainWindow):
         
         # Connect label color change signal to timeline
         self.label_panel.label_color_changed.connect(self.timeline.update_label_color)
-        self.label_panel.label_category_changed.connect(self.timeline.update_label_category)
+        # Category is always "default" now, so no need to handle category changes
+        # self.label_panel.label_category_changed.connect(self.timeline.update_label_category)
         
         # Add this connection
         self.label_panel.label_template_list.itemClicked.connect(
@@ -646,6 +647,8 @@ class MainWindow(QMainWindow):
                 
                 # Explicitly set the frame count
                 self.timeline.set_frame_count(self.video_player.frame_count)
+                # Sync FPS so time ruler matches player timing
+                self.timeline.set_fps(self.video_player.fps)
                 
                 # Ensure timeline gets updated
                 self.timeline.update()
@@ -952,23 +955,23 @@ class MainWindow(QMainWindow):
             # Process and add each label
             labels_loaded = 0
             for label_data in data.get("labels", []):
-                # Get order and category
+                # Get order and category (always "default" now)
                 order = label_data.get("order", 0)
                 category = label_data.get("category", "default")
                 
                 # Format name as "order. category"
                 formatted_name = f"{order}. {category}" if order > 0 else category
                 
-                # Create internal label with proper fields and default color
+                # Create internal label with proper fields
                 internal_label = {
                     "id": label_data.get("id", str(uuid.uuid4())),
                     "text": formatted_name,
                     "name": formatted_name,
                     "start_frame": label_data.get("start_frame", 0),
                     "end_frame": label_data.get("end_frame", 0),
-                    "category": category,
+                    "category": "default",  # Always use "default"
                     "description": label_data.get("description", ""),
-                    # No color specified - will use default or category-based
+                    # No color specified - will use default or template-based
                 }
                 
                 # Add to timeline

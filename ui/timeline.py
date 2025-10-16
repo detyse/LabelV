@@ -58,17 +58,19 @@ class Label:
                 pass
 
         # Extract category from name if format is "3. category"
+        # Note: We now extract the actual label name for the category field in export
         category = self.category
         if self.name and '.' in self.name:
             parts = self.name.split('.')
             if len(parts) > 1:
                 # Use everything after the dot and number as the category
                 category = parts[1].strip()
-
+        
+        # Internal category is always "default", but export uses the actual label name
         return {
             "id": self.id,
             "order": order,
-            "category": category,
+            "category": category,  # Export actual label name as category
             "start_frame": self.start_frame,
             "end_frame": self.end_frame,
             "start_time": start_time,
@@ -622,6 +624,7 @@ class TimelineWidget(QWidget):
         """Update the current frame position."""
         if position != self.current_frame:
             self.current_frame = position
+            self.update()
 
     def clear(self):
         """Clear all labels and reset timeline."""
@@ -698,12 +701,7 @@ class TimelineWidget(QWidget):
 
     def get_active_category(self):
         """Retrieve the currently selected category from the label panel."""
-        parent = self.parent()
-        while parent:
-            panel = getattr(parent, "label_panel", None)
-            if panel and hasattr(panel, "current_category"):
-                return panel.current_category()
-            parent = parent.parent()
+        # Category is always "default" now
         return "default"
 
     @Slot(str)
@@ -1349,13 +1347,11 @@ class TimelineWidget(QWidget):
 
     @Slot(str, str)
     def update_label_category(self, label_id, new_category):
-        """Update a label's category and reapply default color."""
-        target_category = new_category or "default"
+        """Update a label's category (always 'default' now)."""
+        # Category is always "default" now, this method is kept for compatibility
         for label in self.labels:
             if label.id == label_id:
-                label.category = target_category
-                label.color_is_custom = False
-                self.apply_category_color(label, force=True)
+                label.category = "default"
                 break
         self.update()
 
