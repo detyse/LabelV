@@ -1167,10 +1167,10 @@ class VideoPlayer(QWidget):
         self.last_frame_time = time.time()
         self.consecutive_late_frames = 0
         
-        # 启动倍速测试计时
-        self.speed_test_start_time = time.time()
-        self.speed_test_start_frame = self.current_frame
-        print(f"Starting speed test: {self.playback_speed}x at frame {self.current_frame}")
+        # 启动倍速测试计时, mute 
+        # self.speed_test_start_time = time.time()
+        # self.speed_test_start_frame = self.current_frame
+        # print(f"Starting speed test: {self.playback_speed}x at frame {self.current_frame}")
         
         # Start playback timer if not running
         if not self.play_timer.isActive():

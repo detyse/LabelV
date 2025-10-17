@@ -147,6 +147,7 @@ class LabelPanel(QWidget):
         # Initialize label properties
         self.current_label_id = None
         self.label_index = "1"  # Default label index
+        self.user_modified_color = False  # Track if user manually changed color
         
         # Settings for persistent templates (must be before setup_ui)
         from PySide6.QtCore import QSettings
@@ -309,7 +310,9 @@ class LabelPanel(QWidget):
         # Color selector row
         color_layout = QHBoxLayout()
         self.color_button = ColorButton()
+        self.color_button.colorChanged.connect(self.on_color_manually_changed)  # Track user color changes
         self.color_button.colorChanged.connect(self.delayed_update)
+        self.color_button.colorChanged.connect(self.update_current_label_list_icon)  # Immediately update list icon
         color_layout.addWidget(self.color_button)
         
         # Color presets
@@ -336,6 +339,7 @@ class LabelPanel(QWidget):
                 }}
             """)
             preset_btn.setToolTip(f"使用预设颜色")
+            # setColor will trigger colorChanged signal, which updates the list icon
             preset_btn.clicked.connect(lambda checked, c=color: self.color_button.setColor(c))
             color_layout.addWidget(preset_btn)
         
@@ -428,7 +432,7 @@ class LabelPanel(QWidget):
         # Label list widget
         self.label_template_list = QListWidget()
         self.label_template_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.label_template_list.setMaximumHeight(100)
+        # self.label_template_list.setMaximumHeight(100)
         
         # Set font for Chinese support
         template_font = QFont()
@@ -676,9 +680,36 @@ class LabelPanel(QWidget):
         if item:
             self.label_template_list.setCurrentItem(item)
 
+    @Slot()
+    def on_color_manually_changed(self):
+        """Called when user manually changes color via color button."""
+        if not self._category_change_in_progress and self.current_label_id:
+            self.user_modified_color = True
+    
     def delayed_update(self):
         """延迟更新计时器"""
-        self.update_timer.start(300)  # 300ms delay
+        self.update_timer.start(100)  # 100ms delay for more responsive updates
+    
+    def update_current_label_list_icon(self):
+        """Immediately update the color icon of the current label in the list."""
+        if not self.current_label_id:
+            return
+        
+        color = self.color_button.color()
+        
+        # Find and update the list item icon
+        for i in range(self.label_list.count()):
+            item = self.label_list.item(i)
+            if item.data(Qt.UserRole) == self.current_label_id:
+                pixmap = QPixmap(16, 16)
+                pixmap.fill(Qt.transparent)
+                painter = QPainter(pixmap)
+                painter.setBrush(QBrush(color))
+                painter.setPen(Qt.black)
+                painter.drawRect(0, 0, 15, 15)
+                painter.end()
+                item.setIcon(QIcon(pixmap))
+                break
 
     def _build_default_templates(self):
         """Construct default templates with distinct colours."""
@@ -897,18 +928,19 @@ class LabelPanel(QWidget):
             "description": ""
         }
         
-        # Emit signal to add label
+        # If a template is selected, apply it BEFORE adding to timeline
+        if self.selected_template_name:
+            tpl = self.template_lookup.get(self._normalize_template_key(self.selected_template_name))
+            if tpl:
+                label_data["name"] = tpl["name"]
+                label_data["category"] = tpl.get("category", self.default_category_key)
+                label_data["color"] = tpl.get("color", label_data["color"])
+                label_data["color_is_custom"] = False
+                self.selected_category_key = label_data["category"]
+        
+        # Emit signal to add label (timeline will pick initial color correctly)
+        # The timeline will emit label_created signal, which will trigger add_label_to_list via MainWindow
         self.label_added.emit(label_data)
-        
-        # Add to list
-        self.add_label_to_list(label_data)
-        
-        # Select the new item
-        for i in range(self.label_list.count()):
-            item = self.label_list.item(i)
-            if item.data(Qt.UserRole) == label_id:
-                self.label_list.setCurrentItem(item)
-                break
         self.update_label_count()
     
     @Slot()
@@ -966,18 +998,19 @@ class LabelPanel(QWidget):
         action_name = self.name_edit.text().strip()
         full_name = f"{self.label_index}. {action_name}" if action_name else f"{self.label_index}."
 
-        # Smart color application: check if name matches a template
+        # Always use "default" category
+        category = self.default_category_key
+        color = self.color_button.color()
+        
+        # Check if name matches a template
         template = None
         if action_name:
             template = self.template_lookup.get(self._normalize_template_key(action_name))
 
-        # Always use "default" category
-        category = self.default_category_key
-        color = self.color_button.color()
-        color_is_custom = True  # Assume custom by default
-
-        if template:
-            # If there's a matching template, ALWAYS apply its color
+        # Determine color_is_custom status
+        # Only apply template color if: 1) template exists, 2) user hasn't manually changed color
+        if template and not self.user_modified_color:
+            # Apply template color only if user hasn't customized it
             target_color = self._list_to_qcolor(template.get("color"))
             if self.color_button.color() != target_color:
                 self._category_change_in_progress = True
@@ -988,13 +1021,10 @@ class LabelPanel(QWidget):
                 finally:
                     self.color_button.blockSignals(False)
                     self._category_change_in_progress = False
-            # Mark as non-custom since it's from template
             color_is_custom = False
         else:
-            # No template match - check if user changed the color manually
-            default_color = self.category_colors.get(self.default_category_key)
-            if default_color and color == default_color:
-                color_is_custom = False
+            # User has modified color, or no template match
+            color_is_custom = self.user_modified_color
 
         label_data = {
             "id": self.current_label_id,
@@ -1092,10 +1122,11 @@ class LabelPanel(QWidget):
                 if template:
                     label_data["name"] = template["name"]
                     label_data["category"] = template.get("category", self.default_category_key)
-                    label_data["color"] = template.get("color", label_data.get("color"))
-                    label_data["color_is_custom"] = False
+                    # Only apply template color if no custom color is set
+                    if not label_data.get("color_is_custom", False):
+                        label_data["color"] = template.get("color", label_data.get("color"))
+                    label_data["color_is_custom"] = label_data.get("color_is_custom", False)
                     self.selected_category_key = template.get("category", self.default_category_key)
-                    self._update_category_display()
                 else:
                     label_data["name"] = self.selected_template_name
                     label_data["category"] = self.selected_category_key or self.default_category_key
@@ -1165,6 +1196,9 @@ class LabelPanel(QWidget):
         self.current_label_id = label_data["id"]
         # Category is always "default" internally
         self.selected_category_key = self.default_category_key
+        
+        # Reset user_modified_color flag based on label's color_is_custom status
+        self.user_modified_color = label_data.get("color_is_custom", False)
 
         # Parse label name - maintain the index format "1. Action"
         name = label_data.get("name", "")
@@ -1198,6 +1232,9 @@ class LabelPanel(QWidget):
         self.color_button.blockSignals(True)
         self.color_button.setColor(QColor(*color_rgba))
         self.color_button.blockSignals(False)
+        
+        # Update the list item icon with the loaded color
+        self.update_current_label_list_icon()
         
         self.description_edit.setPlainText(label_data.get("description", ""))
         
@@ -1264,6 +1301,7 @@ class LabelPanel(QWidget):
         self.name_edit.clear()
         self.description_edit.clear()
         self.selected_category_key = self.default_category_key
+        self.user_modified_color = False  # Reset color modification flag
         default_color = self.category_colors.get(self.default_category_key, QColor(255, 165, 0, 180))
         self.color_button.blockSignals(True)
         self.color_button.setColor(default_color)  # Reset to default color

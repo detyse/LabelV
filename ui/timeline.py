@@ -67,16 +67,19 @@ class Label:
                 category = parts[1].strip()
         
         # Internal category is always "default", but export uses the actual label name
+        # Include name and color for round-trip fidelity (color_is_custom omitted as templates may change)
         return {
             "id": self.id,
+            "name": self.name,
             "order": order,
-            "category": category,  # Export actual label name as category
+            "category": category,       # Export actual label name as category
             "start_frame": self.start_frame,
             "end_frame": self.end_frame,
             "start_time": start_time,
             "end_time": end_time,
             "duration": duration,
-            "description": self.description
+            "description": self.description,
+            "color": [self.color.red(), self.color.green(), self.color.blue(), self.color.alpha()]
         }
 
     @staticmethod
@@ -1040,12 +1043,23 @@ class TimelineWidget(QWidget):
                 start_frame = min(self.mouse_down_frame, self.current_frame)
                 end_frame = max(self.mouse_down_frame, self.current_frame)
 
-                # Get the selected template name from the label panel
+                # Get template info from label panel (including color)
                 template_name = "New Label"
+                template_color = None
+                label_panel = None
                 parent = self.parent()
                 while parent:
                     if hasattr(parent, 'label_panel'):
-                        template_name = parent.label_panel.selected_template
+                        label_panel = parent.label_panel
+                        template_name = label_panel.selected_template
+                        # Get template color if available
+                        if label_panel.selected_template_name:
+                            norm_key = label_panel._normalize_template_key(label_panel.selected_template_name)
+                            template = label_panel.template_lookup.get(norm_key)
+                            if template:
+                                # Convert template color list to QColor
+                                color_list = template.get("color", [255, 165, 0, 180])
+                                template_color = QColor(*color_list)
                         break
                     parent = parent.parent()
 
@@ -1064,16 +1078,19 @@ class TimelineWidget(QWidget):
 
                 next_number = max(existing_numbers) + 1 if existing_numbers else 1
 
-                # Create label with formatted name
+                # Create label with formatted name and template color
                 active_category = self.get_active_category()
                 label = Label(
                     name=f"{next_number}. {base_name}",
                     category=active_category,
                     start_frame=start_frame,
                     end_frame=end_frame,
+                    color=template_color,  # Use template color directly
                     color_is_custom=False
                 )
-                self.apply_category_color(label, force=True)
+                # Only apply category color if no template color was found
+                if template_color is None:
+                    self.apply_category_color(label, force=True)
 
                 # Add to labels list
                 self.labels.append(label)
