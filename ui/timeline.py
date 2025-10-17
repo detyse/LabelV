@@ -11,9 +11,8 @@ from PySide6.QtGui import (QPainter, QBrush, QPen, QColor, QPainterPath,
 
 class Label:
     """Represents a video label with start and end frames."""
-    
     def __init__(self, label_id=None, name="Unnamed", start_frame=0, end_frame=0, 
-                 color=None, category=None, description=None):
+                 color=None, category=None, description=None, color_is_custom=False):
         self.id = label_id if label_id else str(uuid.uuid4())
         self.name = name
         self.start_frame = start_frame
@@ -21,8 +20,9 @@ class Label:
         self.color = color or QColor(255, 165, 0, 180)  # Default orange with transparency
         self.category = category or "default"
         self.description = description or ""
+        self.color_is_custom = color_is_custom
         self.selected = False
-    
+
     def to_dict(self):
         """Convert label to dictionary for serialization."""
         return {
@@ -31,22 +31,23 @@ class Label:
             "start_frame": self.start_frame,
             "end_frame": self.end_frame,
             "color": [self.color.red(), self.color.green(), self.color.blue(), self.color.alpha()],
+            "color_is_custom": self.color_is_custom,
             "category": self.category,
             "description": self.description
         }
-        
+
     def to_export_dict(self, fps=30.0):
         """Convert label to dictionary for export with timestamps."""
         # Calculate timestamps
         start_time_sec = self.start_frame / fps if fps > 0 else 0
         end_time_sec = self.end_frame / fps if fps > 0 else 0
         duration_sec = end_time_sec - start_time_sec
-        
+
         # Format timestamps as strings
         start_time = self.format_timestamp(start_time_sec)
         end_time = self.format_timestamp(end_time_sec)
         duration = self.format_timestamp(duration_sec)
-        
+
         # Extract order number from label name if it follows the pattern "1. Name"
         order = 0
         if self.name and '.' in self.name:
@@ -55,8 +56,9 @@ class Label:
                 order = int(order_str)
             except (ValueError, IndexError):
                 pass
-        
+
         # Extract category from name if format is "3. category"
+        # Note: We now extract the actual label name for the category field in export
         category = self.category
         if self.name and '.' in self.name:
             parts = self.name.split('.')
@@ -64,18 +66,22 @@ class Label:
                 # Use everything after the dot and number as the category
                 category = parts[1].strip()
         
+        # Internal category is always "default", but export uses the actual label name
+        # Include name and color for round-trip fidelity (color_is_custom omitted as templates may change)
         return {
             "id": self.id,
+            "name": self.name,
             "order": order,
-            "category": category,
+            "category": category,       # Export actual label name as category
             "start_frame": self.start_frame,
             "end_frame": self.end_frame,
             "start_time": start_time,
             "end_time": end_time,
             "duration": duration,
-            "description": self.description
+            "description": self.description,
+            "color": [self.color.red(), self.color.green(), self.color.blue(), self.color.alpha()]
         }
-    
+
     @staticmethod
     def format_timestamp(seconds):
         """Format seconds to HH:MM:SS.mmm format."""
@@ -83,7 +89,7 @@ class Label:
         minutes = int((seconds % 3600) // 60)
         seconds_remainder = seconds % 60
         return f"{hours:02d}:{minutes:02d}:{seconds_remainder:06.3f}"
-    
+
     @classmethod
     def from_dict(cls, data):
         """Create label from dictionary."""
@@ -94,7 +100,7 @@ class Label:
         else:
             # List of RGB(A) values or default
             color = QColor(*data.get("color", [255, 165, 0, 180]))
-        
+
         return cls(
             label_id=data.get("id"),
             name=data.get("name", data.get("text", "Unnamed")),  # Support both name and text keys
@@ -102,28 +108,29 @@ class Label:
             end_frame=data.get("end_frame", 0),
             color=color,
             category=data.get("category", "default"),
-            description=data.get("description", "")
+            description=data.get("description", ""),
+            color_is_custom=data.get("color_is_custom", False)
         )
-    
+
     def duration(self):
         """Get label duration in frames."""
         return max(0, self.end_frame - self.start_frame)
-    
+
     def contains_frame(self, frame):
         """Check if the label contains a specific frame."""
         return self.start_frame <= frame <= self.end_frame
 
-
 class TimelineWidget(QWidget):
     """Widget for displaying video timeline and labeled regions."""
-    
+
     # Signals
     position_changed = Signal(int)  # Current position
     label_selected = Signal(str)  # Label ID
     label_double_clicked = Signal(str)  # Label ID
     label_playback_requested = Signal(int, int)  # start_frame, end_frame
     label_created = Signal(object)  # Emit the new label data
-    
+    label_removed = Signal(str)  # Label ID removed from timeline
+
     # States for mouse interactions
     NONE = 0
     DRAGGING_POSITION = 1
@@ -131,24 +138,25 @@ class TimelineWidget(QWidget):
     MOVING_LABEL = 3
     RESIZING_LABEL_START = 4
     RESIZING_LABEL_END = 5
-    
+
     # Operation modes
     CHOOSE_MODE = 0  # For scrolling and navigating
     EDIT_MODE = 1    # For creating and editing labels
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        
+
         # Timeline properties
         self.frame_count = 0
         self.current_frame = 0
         self.zoom_level = 1.0
         self.offset = 0
+        self.category_colors = {}
         self.fps = 30.0  # Default FPS
-        
+
         # Labels
         self.labels = []
-        
+
         # Interaction state
         self.state = self.NONE
         self.mouse_down_pos = None
@@ -156,98 +164,98 @@ class TimelineWidget(QWidget):
         self.selected_label_idx = -1
         self.hover_label_idx = -1
         self.drag_start_frame = 0
-        
+
         # Current operation mode - default to CHOOSE_MODE for safer navigation
         self.current_mode = self.CHOOSE_MODE
-        
+
         # UI settings
         self.timeline_height = 50
         self.label_track_height = 30
         self.time_marker_height = 15
         self.resize_handle_width = 5
-        
+
         # Enable mouse tracking for hover effects
         self.setMouseTracking(True)
-        
+
         # Set minimum height
         self.setMinimumHeight(100)
-        
+
         # Set focus policy
         self.setFocusPolicy(Qt.StrongFocus)
-        
+
         # Track management
         self.tracks = []  # Will store track occupation data
-        
+
         # Debug mode
         self.debug_mode = False  # Set to True to show selection regions
-    
+
     def get_frame_at_position(self, x_pos):
         """Convert x position to frame number."""
         # Calculate visible timeline width
         timeline_width = self.width()
-        
+
         # Calculate the visible frame range
         visible_frames = self.frame_count / self.zoom_level
-        
+
         # Calculate frame position
         frame = int(self.offset + (x_pos / timeline_width) * visible_frames)
-        
+
         # Clamp to valid range
         return max(0, min(self.frame_count - 1, frame))
-    
+
     def get_position_for_frame(self, frame):
         """Convert frame number to x position."""
         if self.frame_count == 0:
             return 0
-            
+
         # Calculate visible timeline width
         timeline_width = self.width()
-        
+
         # Calculate the visible frame range
         visible_frames = self.frame_count / self.zoom_level
-        
+
         # Calculate x position
         relative_frame = frame - self.offset
         x_pos = (relative_frame / visible_frames) * timeline_width
-        
+
         return x_pos
-    
+
     def paintEvent(self, event):
         """Handle paint event to draw the timeline."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.TextAntialiasing)
-        
+
         # Draw background with gradient
         background = QLinearGradient(0, 0, 0, self.height())
         background.setColorAt(0, QColor(45, 52, 54))
         background.setColorAt(1, QColor(99, 110, 114))
         painter.fillRect(self.rect(), background)
-        
+
         if self.frame_count == 0:
             # No video loaded - show helpful message
             painter.setPen(QColor(220, 221, 225))
             font = QFont()
             font.setPointSize(14)
             painter.setFont(font)
-            
+
             # Draw message with icon
             message = "🎬 请先加载视频文件"
             hint = "提示：使用 Ctrl+O 打开视频"
-            
+
             rect = self.rect()
             painter.drawText(rect.adjusted(0, -20, 0, 0), Qt.AlignCenter, message)
-            
+
             font.setPointSize(10)
             painter.setFont(font)
             painter.setPen(QColor(160, 170, 175))
             painter.drawText(rect.adjusted(0, 20, 0, 0), Qt.AlignCenter, hint)
             return
-        
+
         # Calculate dimensions
         width = self.width()
         height = self.height()
-        
+
         # Draw timeline track background with enhanced gradient
         timeline_rect = QRectF(0, 0, width, self.timeline_height)
         gradient = QLinearGradient(0, 0, 0, self.timeline_height)
@@ -255,49 +263,49 @@ class TimelineWidget(QWidget):
         gradient.setColorAt(0.5, QColor(78, 84, 100))
         gradient.setColorAt(1, QColor(65, 72, 84))
         painter.fillRect(timeline_rect, gradient)
-        
+
         # Add subtle inner shadow
         shadow_gradient = QLinearGradient(0, 0, 0, 8)
         shadow_gradient.setColorAt(0, QColor(0, 0, 0, 40))
         shadow_gradient.setColorAt(1, QColor(0, 0, 0, 0))
         painter.fillRect(QRectF(0, 0, width, 8), shadow_gradient)
-        
+
         # Draw timeline ruler with grid lines
         self.draw_time_markers(painter, timeline_rect)
-        
+
         # Draw label tracks with enhanced background
         label_area_rect = QRectF(0, self.timeline_height, width, height - self.timeline_height)
         label_gradient = QLinearGradient(0, self.timeline_height, 0, height)
         label_gradient.setColorAt(0, QColor(52, 58, 64))
         label_gradient.setColorAt(1, QColor(44, 50, 56))
         painter.fillRect(label_area_rect, label_gradient)
-        
+
         # Draw enhanced separator line between timeline and label area
         separator_gradient = QLinearGradient(0, self.timeline_height-1, 0, self.timeline_height+2)
         separator_gradient.setColorAt(0, QColor(120, 140, 160, 100))
         separator_gradient.setColorAt(0.5, QColor(160, 180, 200, 200))
         separator_gradient.setColorAt(1, QColor(80, 100, 120, 100))
         painter.fillRect(QRectF(0, self.timeline_height-1, width, 3), separator_gradient)
-        
+
         # Draw labels
         self.draw_labels(painter, label_area_rect)
-        
+
         # Draw current position marker with enhanced style
         position_x = self.get_position_for_frame(self.current_frame)
         self.draw_timeline_scrubber(painter, position_x, height)
-    
+
     def draw_time_markers(self, painter, rect):
         """Draw time markers on the timeline."""
         if self.frame_count <= 0 or self.fps <= 0:
             return
-        
+
         total_seconds = self.frame_count / self.fps if self.fps > 0 else 0
-        
+
         # Safety check - if total_seconds is unreasonably large, cap it
         if total_seconds > 86400:  # Cap at 24 hours to prevent UI issues
             print(f"Warning: Capping timeline display to 24 hours (actual duration: {total_seconds:.1f}s)")
             total_seconds = 86400
-        
+
         # Determine appropriate intervals based on zoom level and total duration
         if total_seconds < 10:
             # For very short videos, show tenths of seconds
@@ -323,36 +331,36 @@ class TimelineWidget(QWidget):
             # For longer videos
             major_interval = 600  # Every 10 minutes
             minor_interval = 60  # Every minute
-        
+
         # Use manual iteration instead of np.arange to avoid potential memory issues
         start_second_major = 0
         end_second_major = min(total_seconds, 86400)  # Cap at 24 hours
-        
+
         start_second_minor = 0
         end_second_minor = min(total_seconds, 86400)  # Cap at 24 hours
-        
+
         # Draw major time markers with enhanced styling
         font = QFont()
         font.setPointSize(9)
         font.setWeight(QFont.Bold)
         painter.setFont(font)
-        
+
         # Use manual iteration with a reasonable step
         current_second = start_second_major
         while current_second <= end_second_major:
             # Calculate position
             frame = int(current_second * self.fps)
             position = self.get_position_for_frame(frame)
-            
+
             # Draw gradient line for major markers
             line_gradient = QLinearGradient(position, rect.top(), position, rect.top() + rect.height() * 0.6)
             line_gradient.setColorAt(0, QColor(220, 235, 250, 220))
             line_gradient.setColorAt(1, QColor(180, 195, 210, 120))
-            
+
             painter.setPen(QPen(QBrush(line_gradient), 2))
             painter.drawLine(QPointF(position, rect.top()), 
                             QPointF(position, rect.top() + rect.height() * 0.6))
-            
+
             # Format time as MM:SS or HH:MM:SS
             if current_second < 3600:
                 minutes = int(current_second // 60)
@@ -363,24 +371,24 @@ class TimelineWidget(QWidget):
                 minutes = int((current_second % 3600) // 60)
                 seconds = int(current_second % 60)
                 time_text = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-            
+
             # Draw text with shadow effect
             text_rect = QRectF(position - 50, rect.top() + rect.height() * 0.6, 100, rect.height() * 0.4)
-            
+
             # Text shadow
             painter.setPen(QColor(0, 0, 0, 100))
             painter.drawText(text_rect.adjusted(1, 1, 1, 1), Qt.AlignCenter, time_text)
-            
+
             # Main text
             painter.setPen(QColor(240, 245, 250))
             painter.drawText(text_rect, Qt.AlignCenter, time_text)
-            
+
             # Move to next major marker
             current_second += major_interval
-        
+
         # Draw minor time markers with subtle styling
         painter.setPen(QPen(QColor(160, 175, 190, 80), 1))
-        
+
         # Use manual iteration for minor markers too
         current_second = start_second_minor
         while current_second <= end_second_minor:
@@ -388,41 +396,41 @@ class TimelineWidget(QWidget):
             if current_second % major_interval == 0:
                 current_second += minor_interval
                 continue
-            
+
             # Calculate position
             frame = int(current_second * self.fps)
             position = self.get_position_for_frame(frame)
-            
+
             # Draw minor tick with gradient
             minor_gradient = QLinearGradient(position, rect.top(), position, rect.top() + rect.height() * 0.3)
             minor_gradient.setColorAt(0, QColor(160, 175, 190, 120))
             minor_gradient.setColorAt(1, QColor(140, 155, 170, 60))
-            
+
             painter.setPen(QPen(QBrush(minor_gradient), 1))
             painter.drawLine(QPointF(position, rect.top()), 
                              QPointF(position, rect.top() + rect.height() * 0.3))
-            
+
             # Move to next minor marker
             current_second += minor_interval
-    
+
     def draw_labels(self, painter, rect):
         """Draw label tracks and labels."""
         if not self.labels:
             return
-        
+
         # Get unique labels and assign them to tracks to avoid overlapping
         self.assign_labels_to_tracks()
-        
+
         # Draw each track background
         track_height = self.label_track_height
         for track_idx in range(len(self.tracks)):
             track_top = rect.top() + track_idx * track_height
             track_rect = QRectF(0, track_top, rect.width(), track_height)
-            
+
             # Draw track background
             bg_color = QColor(55, 55, 55)
             painter.fillRect(track_rect, bg_color)
-        
+
         # Draw labels in their assigned tracks
         for label in self.labels:
             if hasattr(label, 'track'):
@@ -430,7 +438,7 @@ class TimelineWidget(QWidget):
                 track_top = rect.top() + track_idx * track_height
                 track_rect = QRectF(0, track_top, rect.width(), track_height)
                 self.draw_label(painter, label, track_rect)
-        
+
         # Debug drawing
         if self.debug_mode:
             painter.setPen(QPen(QColor(255, 0, 0, 120), 1))
@@ -438,11 +446,11 @@ class TimelineWidget(QWidget):
                 if hasattr(label, 'track'):
                     track_idx = label.track
                     track_top = rect.top() + track_idx * track_height
-                    
+
                     # Draw label hit areas
                     label_left = self.get_position_for_frame(label.start_frame)
                     label_right = self.get_position_for_frame(label.end_frame)
-                    
+
                     # Draw selection area
                     debug_rect = QRectF(
                         label_left - 8,
@@ -451,16 +459,16 @@ class TimelineWidget(QWidget):
                         track_height
                     )
                     painter.drawRect(debug_rect)
-    
+
     def draw_label(self, painter, label, track_rect):
         """Draw a single label on the timeline."""
         start_x = self.get_position_for_frame(label.start_frame)
         end_x = self.get_position_for_frame(label.end_frame)
-        
+
         # Skip if not visible
         if end_x < 0 or start_x > self.width():
             return
-            
+
         # Create label rectangle
         margin = 2
         label_rect = QRectF(
@@ -469,18 +477,18 @@ class TimelineWidget(QWidget):
             max(5, end_x - start_x),  # Ensure minimum width for visibility
             track_rect.height() - 2 * margin
         )
-        
+
         # Determine if this label is being hovered
         is_hovered = (self.hover_label_idx >= 0 and 
                      self.hover_label_idx < len(self.labels) and 
                      self.labels[self.hover_label_idx].id == label.id)
-        
+
         # Create gradient for label background
         gradient = QLinearGradient(
             label_rect.topLeft(),
             label_rect.bottomLeft()
         )
-        
+
         base_color = QColor(label.color)
         if label.selected:
             # Make selected labels significantly brighter for better visibility
@@ -488,35 +496,35 @@ class TimelineWidget(QWidget):
         elif is_hovered:
             # Make hovered labels more noticeable
             base_color = base_color.lighter(125)  # Increase from 115 to 125
-            
+
         darker_color = base_color.darker(130)
         gradient.setColorAt(0, base_color)
         gradient.setColorAt(1, darker_color)
-        
+
         # Draw label background
         painter.setBrush(QBrush(gradient))
-        
+
         # Draw border
         if label.selected:
             # Add stronger glow effect for selected labels
             glow_pen = QPen(QColor(255, 255, 255, 230), 3)  # Wider, more opaque
             painter.setPen(glow_pen)
             painter.drawRoundedRect(label_rect.adjusted(-1.5, -1.5, 1.5, 1.5), 4, 4)
-            
+
             # Draw actual border
             painter.setPen(QPen(QColor(255, 255, 255), 2))
         elif is_hovered:
             painter.setPen(QPen(QColor(230, 230, 230), 1.5))
         else:
             painter.setPen(QPen(darker_color, 1))
-            
+
         painter.drawRoundedRect(label_rect, 4, 4)
-        
+
         # Draw resize handles
         if label.selected or is_hovered:
             # Draw start handle
             handle_color = QColor(255, 255, 255, 220) if label.selected else QColor(220, 220, 220, 180)
-            
+
             start_handle_rect = QRectF(
                 label_rect.left(), 
                 label_rect.top(), 
@@ -526,7 +534,7 @@ class TimelineWidget(QWidget):
             painter.setPen(Qt.black)
             painter.setBrush(handle_color)
             painter.drawRect(start_handle_rect)
-            
+
             # Draw end handle
             end_handle_rect = QRectF(
                 label_rect.right() - self.resize_handle_width, 
@@ -535,10 +543,10 @@ class TimelineWidget(QWidget):
                 label_rect.height()
             )
             painter.drawRect(end_handle_rect)
-            
+
             # Draw small arrows in the handles to indicate direction
             painter.setPen(QPen(Qt.black, 1))
-            
+
             # Left handle arrow
             left_arrow_y = start_handle_rect.center().y()
             painter.drawLine(
@@ -553,7 +561,7 @@ class TimelineWidget(QWidget):
                 start_handle_rect.left() + 4, 
                 left_arrow_y + 3
             )
-            
+
             # Right handle arrow
             right_arrow_y = end_handle_rect.center().y()
             painter.drawLine(
@@ -568,22 +576,22 @@ class TimelineWidget(QWidget):
                 end_handle_rect.right() - 4, 
                 right_arrow_y + 3
             )
-        
+
         # Draw label text if there's enough space
         if label_rect.width() > 30:
             font = QFont()
             font.setPointSize(8)
             font.setFamily("Microsoft YaHei, SimHei, Arial Unicode MS, sans-serif")  # Support Chinese fonts
             painter.setFont(font)
-            
+
             # Format timestamps for start and end frames
             start_time_sec = label.start_frame / self.fps if self.fps > 0 else 0
             end_time_sec = label.end_frame / self.fps if self.fps > 0 else 0
-            
+
             # Format time as MM:SS or HH:MM:SS depending on length
             start_time = self.format_time_compact(start_time_sec)
             end_time = self.format_time_compact(end_time_sec)
-            
+
             # Create label text with timestamps
             if label_rect.width() > 150:
                 # Full format with timestamps if there's enough space
@@ -595,33 +603,32 @@ class TimelineWidget(QWidget):
             else:
                 # Just the label name if space is limited
                 display_text = label.name
-            
+
             # Draw text with contrasting color for better visibility
             font_metrics = QFontMetrics(font)
             text_width = font_metrics.horizontalAdvance(display_text)
-            
+
             if text_width + 10 <= label_rect.width():
                 text_rect = label_rect.adjusted(5, 0, -5, 0)
-                
+
                 # Choose text color based on background brightness
                 # for better contrast
                 qcolor = QColor(base_color)
                 brightness = (qcolor.red() * 299 + qcolor.green() * 587 + qcolor.blue() * 114) / 1000
-                
+
                 if brightness > 128:
                     painter.setPen(QColor(0, 0, 0))  # Black text on light background
                 else:
                     painter.setPen(QColor(255, 255, 255))  # White text on dark background
-                    
+
                 painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, display_text)
-    
     @Slot(int)
     def update_position(self, position):
         """Update the current frame position."""
         if position != self.current_frame:
             self.current_frame = position
             self.update()
-    
+
     def clear(self):
         """Clear all labels and reset timeline."""
         self.labels.clear()
@@ -632,13 +639,13 @@ class TimelineWidget(QWidget):
         self.selected_label_idx = -1
         self.hover_label_idx = -1
         self.update()
-    
+
     @Slot(int)
     def set_frame_count(self, count):
         """Set the total frame count."""
         self.frame_count = count
         self.update()
-    
+
     @Slot(dict)
     def add_label(self, label_data):
         """Add a new label to the timeline."""
@@ -647,26 +654,59 @@ class TimelineWidget(QWidget):
             label_data['text'] = label_data['name']
         elif 'text' in label_data and 'name' not in label_data:
             label_data['name'] = label_data['text']
-        
+
         # Create label from data
         label = Label.from_dict(label_data)
-        
-        # Apply category-based coloring
-        if hasattr(self, 'category_colors') and label.category in self.category_colors:
-            label.color = self.category_colors[label.category]
+
+        # Track whether the label color was manually overridden
+        if "color_is_custom" in label_data:
+            label.color_is_custom = bool(label_data["color_is_custom"])
         else:
-            # Assign default color
-            label.color = QColor(255, 165, 0, 180)  # Default orange with transparency
-        
+            default_color = None
+            if self.category_colors:
+                category_key = getattr(label, 'category', 'default') or 'default'
+                default_color = self.category_colors.get(category_key) or self.category_colors.get('default')
+            if default_color is not None:
+                label.color_is_custom = QColor(label.color) != QColor(default_color)
+            else:
+                label.color_is_custom = False
+
+        # Apply category color when appropriate
+        self.apply_category_color(label)
+
         # Add to labels list
         self.labels.append(label)
-        
+
         # Clear selection and select the new label
         self.select_label_by_id(label.id)
-        
+
         self.update()
         return True
-    
+
+    def apply_category_color(self, label, force=False):
+        """Apply the mapped category color to a label when allowed."""
+        if not self.category_colors:
+            return
+        category = getattr(label, "category", "default")
+        if category not in self.category_colors:
+            return
+        if getattr(label, "color_is_custom", False) and not force:
+            return
+        label.color = QColor(self.category_colors[category])
+        label.color_is_custom = False
+
+    def set_category_colors(self, category_colors):
+        """Set category colors and refresh non-custom labels."""
+        self.category_colors = {name: QColor(color) for name, color in category_colors.items()}
+        for label in self.labels:
+            self.apply_category_color(label)
+        self.update()
+
+    def get_active_category(self):
+        """Retrieve the currently selected category from the label panel."""
+        # Category is always "default" now
+        return "default"
+
     @Slot(str)
     def remove_label(self, label_id):
         """Remove a label by ID."""
@@ -677,27 +717,28 @@ class TimelineWidget(QWidget):
                     self.selected_label_idx = -1
                 elif self.selected_label_idx > i:
                     self.selected_label_idx -= 1
-                    
+
                 if self.hover_label_idx == i:
                     self.hover_label_idx = -1
                 elif self.hover_label_idx > i:
                     self.hover_label_idx -= 1
-                    
+
                 self.update()
+                self.label_removed.emit(label_id)
                 return
-    
+
     @Slot(str)
     def select_label(self, label_id):
         """Select a label by ID."""
         self.select_label_by_id(label_id)
         self.update()
-    
+
     def select_label_by_id(self, label_id):
         """Helper to select a label by ID."""
         # Always clear all selections first
         for label in self.labels:
             label.selected = False
-        
+
         # Find and select the label
         self.selected_label_idx = -1
         for i, label in enumerate(self.labels):
@@ -705,51 +746,51 @@ class TimelineWidget(QWidget):
                 label.selected = True
                 self.selected_label_idx = i
                 break
-    
+
     def find_label_at_position(self, pos):
         """Find the label and region at the given position."""
         x, y = pos.x(), pos.y()
-        
+
         # Calculate timeline area
         timeline_rect = QRectF(0, 0, self.width(), self.timeline_height)
-        
+
         # Check if position is in the label tracks area
         if y >= timeline_rect.bottom() and y < self.height():
             # Get visible frame range - fix calculation
             visible_frames = self.frame_count / self.zoom_level
             start_frame = max(0, int(self.offset))
             end_frame = min(self.frame_count, int(self.offset + visible_frames))
-            
+
             # Debug output if enabled
             if self.debug_mode:
                 print(f"Mouse at: {x}, {y}, Visible frames: {start_frame}-{end_frame}")
-            
+
             if start_frame >= end_frame:
                 return -1, None
-            
+
             # Check labels in reverse order (top-most drawn last)
             for i in range(len(self.labels) - 1, -1, -1):
                 label = self.labels[i]
-                
+
                 # Skip if label is outside visible range - more lenient check
                 if label.end_frame < start_frame - 10 or label.start_frame > end_frame + 10:
                     continue
-                
+
                 # Calculate track position
                 track_idx = getattr(label, 'track', 0)
                 track_top = timeline_rect.bottom() + track_idx * self.label_track_height
                 track_rect = QRectF(0, track_top, self.width(), self.label_track_height)
-                
+
                 # Check if click is within track height with more tolerance
                 if y >= track_rect.top() - 2 and y <= track_rect.bottom() + 2:
                     # Convert label frames to pixel positions
                     label_left = self.get_position_for_frame(label.start_frame)
                     label_right = self.get_position_for_frame(label.end_frame)
-                    
+
                     # Ensure minimum width for better hit detection
                     if (label_right - label_left) < 10:
                         label_right = label_left + 10
-                    
+
                     # Increase margins for easier selection (increase to 10)
                     label_rect = QRectF(
                         label_left - 10, 
@@ -757,11 +798,11 @@ class TimelineWidget(QWidget):
                         label_right - label_left + 20, 
                         track_rect.height()
                     )
-                    
+
                     # Debug visualization if enabled
                     if self.debug_mode:
                         print(f"Label {i} ({label.name}): rect={label_rect}, contains={label_rect.contains(x, y)}")
-                    
+
                     if label_rect.contains(x, y):
                         # Detect which part was clicked
                         start_handle_rect = QRectF(
@@ -772,7 +813,7 @@ class TimelineWidget(QWidget):
                         )
                         if start_handle_rect.contains(x, y):
                             return i, "start_handle"
-                        
+
                         end_handle_rect = QRectF(
                             label_right - self.resize_handle_width - 10, 
                             track_rect.top(), 
@@ -781,35 +822,35 @@ class TimelineWidget(QWidget):
                         )
                         if end_handle_rect.contains(x, y):
                             return i, "end_handle"
-                        
+
                         # Must be the body
                         return i, "body"
-            
+
             # No label found
             return -1, None
-        
+
         # Not in label area
         return -1, None
-    
+
     def mousePressEvent(self, event):
         """Handle mouse press events."""
         # Calculate frame at click position
         click_frame = self.get_frame_at_position(event.position().x())
-        
+
         # Store mouse position and frame for potential drag operations
         self.mouse_down_pos = event.position()
         self.mouse_down_frame = click_frame
-        
+
         # Check if clicking on a label first, regardless of mode
         label_idx, region = self.find_label_at_position(event.position())
-        
+
         # LEFT MOUSE BUTTON HANDLING
         if event.button() == Qt.LeftButton:
             # If we clicked on a label, prioritize selection over other actions
             if label_idx >= 0:
                 # Select the label in all modes
                 self.select_label_at_index(label_idx)
-                
+
                 # In CHOOSE_MODE, request playback
                 if self.current_mode == self.CHOOSE_MODE:
                     label = self.labels[label_idx]
@@ -817,7 +858,7 @@ class TimelineWidget(QWidget):
                     # self.label_playback_requested.emit(label.start_frame, label.end_frame)
                     # Don't reset state immediately
                     # self.state = self.NONE  # This prevents drag operations
-                    
+
                     # Allow the selection to be visible first
                     self.state = self.DRAGGING_POSITION
                     # We'll emit the playback signal on mouse release instead
@@ -838,40 +879,40 @@ class TimelineWidget(QWidget):
                 self.state = self.DRAGGING_POSITION
                 self.current_frame = click_frame
                 self.position_changed.emit(self.current_frame)
-                
+
                 # Deselect any selected label when clicking empty space
                 if self.selected_label_idx >= 0:
                     self.labels[self.selected_label_idx].selected = False
                     self.selected_label_idx = -1
-        
+
         # RIGHT MOUSE BUTTON HANDLING - Only for creating new labels in EDIT_MODE
         elif event.button() == Qt.RightButton and self.current_mode == self.EDIT_MODE:
             # Start creating a new label
             self.state = self.CREATING_LABEL
             self.current_frame = click_frame
             self.position_changed.emit(self.current_frame)
-        
+
         self.update()
-    
+
     def select_label_at_index(self, idx):
         """Select the label at the given index."""
         if idx < 0 or idx >= len(self.labels):
             return
-        
+
         # Deselect previously selected label
         if self.selected_label_idx >= 0 and self.selected_label_idx < len(self.labels):
             self.labels[self.selected_label_idx].selected = False
-        
+
         # Select the new label
         self.selected_label_idx = idx
         self.labels[idx].selected = True
-        
+
         # Emit signal with label ID
         label_id = self.labels[idx].id
         self.label_selected.emit(label_id)
-        
+
         self.update()
-    
+
     def mouseMoveEvent(self, event):
         """Handle mouse move events."""
         if not self.mouse_down_pos:
@@ -882,20 +923,20 @@ class TimelineWidget(QWidget):
                 if hover_idx != self.hover_label_idx:
                     self.hover_label_idx = hover_idx
                     self.update()
-                
+
                 # Set cursor based on what's under it
                 if hover_idx >= 0:
                     self.setCursor(Qt.PointingHandCursor)
                 else:
                     self.setCursor(Qt.ArrowCursor)
                 return
-            
+
             # In EDIT_MODE, check for hovering over labels or handles
             hover_idx, hover_region = self.find_label_at_position(event.position())
             if hover_idx != self.hover_label_idx:
                 self.hover_label_idx = hover_idx
                 self.update()
-            
+
             # Set cursor based on what's under it
             if hover_idx >= 0:
                 if hover_region == "start_handle" or hover_region == "end_handle":
@@ -905,38 +946,38 @@ class TimelineWidget(QWidget):
             else:
                 self.setCursor(Qt.CrossCursor)
             return
-        
+
         # Get frame at current mouse position
         current_frame = self.get_frame_at_position(event.position().x())
-        
+
         # Add a small drag threshold to prevent accidental moves
         if self.state == self.MOVING_LABEL:
             # Only start moving if we've moved at least 2 frames
             if abs(current_frame - self.mouse_down_frame) < 2:
                 return
-        
+
         # Handle different drag states
         if self.state == self.DRAGGING_POSITION:
             # Update current position
             self.current_frame = current_frame
             self.position_changed.emit(self.current_frame)
-        
+
         elif self.state == self.CREATING_LABEL:
             # Update position for label preview during creation
             self.current_frame = current_frame
             self.position_changed.emit(self.current_frame)
-        
+
         elif self.state == self.MOVING_LABEL and self.selected_label_idx >= 0:
             # Move the selected label
             label = self.labels[self.selected_label_idx]
-            
+
             # Calculate frame delta
             frame_delta = current_frame - self.drag_start_frame
-            
+
             # Calculate new start and end with boundary checks
             new_start = max(0, label.start_frame + frame_delta)
             new_end = min(self.frame_count - 1, label.end_frame + frame_delta)
-            
+
             # Ensure we don't change the duration
             duration = label.end_frame - label.start_frame
             if new_end - new_start != duration:
@@ -946,18 +987,18 @@ class TimelineWidget(QWidget):
                 else:
                     # Hit left boundary or other constraint
                     new_end = new_start + duration
-            
+
             # Update label positions
             label.start_frame = new_start
             label.end_frame = new_end
-            
+
             # Update drag reference point
             self.drag_start_frame = current_frame
-            
+
             # Update current position to follow the label
             self.current_frame = current_frame
             self.position_changed.emit(self.current_frame)
-        
+
         elif self.state == self.RESIZING_LABEL_START and self.selected_label_idx >= 0:
             # Resize label by moving start point
             label = self.labels[self.selected_label_idx]
@@ -966,7 +1007,7 @@ class TimelineWidget(QWidget):
             label.start_frame = new_start
             self.current_frame = new_start
             self.position_changed.emit(self.current_frame)
-        
+
         elif self.state == self.RESIZING_LABEL_END and self.selected_label_idx >= 0:
             # Resize label by moving end point
             label = self.labels[self.selected_label_idx]
@@ -975,18 +1016,18 @@ class TimelineWidget(QWidget):
             label.end_frame = new_end
             self.current_frame = new_end
             self.position_changed.emit(self.current_frame)
-        
+
         self.update()
-    
+
     def mouseReleaseEvent(self, event):
         """Handle mouse release events."""
         # Only process if we have a stored mouse down position
         if not self.mouse_down_pos:
             return
-        
+
         # Calculate frame at release position
         release_frame = self.get_frame_at_position(event.position().x())
-        
+
         # LEFT MOUSE BUTTON RELEASE
         if event.button() == Qt.LeftButton:
             # If we've clicked a label in CHOOSE_MODE, now play it
@@ -994,26 +1035,37 @@ class TimelineWidget(QWidget):
                 label = self.labels[self.selected_label_idx]
                 # Now emit the playback signal
                 self.label_playback_requested.emit(label.start_frame, label.end_frame)
-        
+
         # RIGHT MOUSE BUTTON RELEASE
         elif event.button() == Qt.RightButton:
             if self.state == self.CREATING_LABEL:
                 # Get the frame range for the new label
                 start_frame = min(self.mouse_down_frame, self.current_frame)
                 end_frame = max(self.mouse_down_frame, self.current_frame)
-                
-                # Get the selected template name from the label panel
+
+                # Get template info from label panel (including color)
                 template_name = "New Label"
+                template_color = None
+                label_panel = None
                 parent = self.parent()
                 while parent:
                     if hasattr(parent, 'label_panel'):
-                        template_name = parent.label_panel.selected_template
+                        label_panel = parent.label_panel
+                        template_name = label_panel.selected_template
+                        # Get template color if available
+                        if label_panel.selected_template_name:
+                            norm_key = label_panel._normalize_template_key(label_panel.selected_template_name)
+                            template = label_panel.template_lookup.get(norm_key)
+                            if template:
+                                # Convert template color list to QColor
+                                color_list = template.get("color", [255, 165, 0, 180])
+                                template_color = QColor(*color_list)
                         break
                     parent = parent.parent()
-                    
+
                 # Create base name from template
                 base_name = template_name.split(". ", 1)[-1] if ". " in template_name else template_name
-                
+
                 # Get the next number based on existing labels
                 existing_numbers = []
                 for lbl in self.labels:
@@ -1023,83 +1075,87 @@ class TimelineWidget(QWidget):
                             existing_numbers.append(int(name_parts[0]))
                         except ValueError:
                             pass
-                
+
                 next_number = max(existing_numbers) + 1 if existing_numbers else 1
-                
-                # Create label with formatted name
+
+                # Create label with formatted name and template color
+                active_category = self.get_active_category()
                 label = Label(
                     name=f"{next_number}. {base_name}",
-                    category="default",
+                    category=active_category,
                     start_frame=start_frame,
-                    end_frame=end_frame
+                    end_frame=end_frame,
+                    color=template_color,  # Use template color directly
+                    color_is_custom=False
                 )
-                
+                # Only apply category color if no template color was found
+                if template_color is None:
+                    self.apply_category_color(label, force=True)
+
                 # Add to labels list
                 self.labels.append(label)
-                
+
                 # Select the new label
                 self.select_label_by_id(label.id)
-                
+
                 # Emit signal with label data
                 self.label_created.emit(label.to_dict())
-                
+
                 # Update the display
                 self.update()
-        
+
         # Reset cursor to appropriate default for mode
         if self.current_mode == self.EDIT_MODE:
             self.setCursor(Qt.CrossCursor)
         else:
             self.setCursor(Qt.ArrowCursor)
-        
+
         # Reset state for all mouse buttons
         self.state = self.NONE
         self.mouse_down_pos = None
         self.update()
-    
+
     def mouseDoubleClickEvent(self, event):
         """Handle mouse double click events."""
         if event.button() == Qt.LeftButton:
             # Check if double-clicked on a label
             label_idx, _ = self.find_label_at_position(event.position())
-            
+
             if label_idx >= 0:
                 # Emit signal for double-clicked label
                 self.label_double_clicked.emit(self.labels[label_idx].id)
-    
+
     def wheelEvent(self, event):
         """Handle mouse wheel events for zooming."""
         if self.frame_count == 0:
             return
-            
+
         # Determine zoom direction
         delta = event.angleDelta().y()
+        if delta == 0:
+            return
         zoom_factor = 1.2 if delta > 0 else 1 / 1.2
-        
-        # Get mouse position as frame before zoom
-        mouse_frame = self.get_frame_at_position(event.position().x())
-        
+
+        # Anchor zoom around the current time cursor
+        anchor_frame = max(0, min(self.frame_count - 1, self.current_frame))
+        timeline_width = max(1, self.width())
+        anchor_position = self.get_position_for_frame(anchor_frame)
+        anchor_fraction = anchor_position / timeline_width if timeline_width else 0.5
+
         # Apply zoom
         old_zoom = self.zoom_level
-        self.zoom_level = max(1.0, min(50.0, self.zoom_level * zoom_factor))
-        
-        # Adjust offset to keep mouse position at same visual point
-        if old_zoom != self.zoom_level:
-            # Calculate mouse position as fraction of width
-            width_fraction = event.position().x() / self.width()
-            
-            # Calculate new visible frame count
-            new_visible_frames = self.frame_count / self.zoom_level
-            
-            # Adjust offset to keep mouse frame at same relative position
-            self.offset = mouse_frame - (new_visible_frames * width_fraction)
-            
-            # Clamp offset
-            max_offset = self.frame_count - new_visible_frames
-            self.offset = max(0, min(max_offset, self.offset))
-            
-            self.update()
-    
+        new_zoom = max(1.0, min(50.0, self.zoom_level * zoom_factor))
+        if old_zoom == new_zoom:
+            return
+        self.zoom_level = new_zoom
+
+        # Adjust offset to keep the anchor frame fixed on screen
+        new_visible_frames = self.frame_count / self.zoom_level if self.zoom_level else self.frame_count
+        self.offset = anchor_frame - (new_visible_frames * anchor_fraction)
+        max_offset = max(0, self.frame_count - new_visible_frames)
+        self.offset = max(0, min(max_offset, self.offset))
+        self.update()
+
     def keyPressEvent(self, event):
         """Handle key press events."""
         if event.key() == Qt.Key_Delete and self.selected_label_idx >= 0:
@@ -1132,37 +1188,37 @@ class TimelineWidget(QWidget):
             # Show status message (requires MainWindow connection)
             if hasattr(self, 'parent') and hasattr(self.parent(), 'statusBar'):
                 self.parent().statusBar().showMessage("Edit Mode: Create and adjust labels", 2000)
-    
+
     def get_labels(self):
         """Get all labels as dictionaries for serialization."""
         return [label.to_dict() for label in self.labels]
-    
+
     def get_labels_for_export(self, fps=None):
         """Get all labels formatted for export with timestamps."""
         if fps is None and hasattr(self, 'fps'):
             fps = self.fps
         elif fps is None:
             fps = 30.0  # Default assumption if FPS not provided
-            
+
         return [label.to_export_dict(fps) for label in self.labels]
-    
+
     def set_fps(self, fps):
         """Set the FPS value for the timeline."""
         if fps > 0:
             self.fps = fps
             self.update()
-    
+
     def format_time_compact(self, seconds):
         """Format seconds to MM:SS or HH:MM:SS format."""
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         secs = int(seconds % 60)
-        
+
         if hours > 0:
             return f"{hours}:{minutes:02d}:{secs:02d}"
         else:
             return f"{minutes:02d}:{secs:02d}"
-    
+
     def draw_timeline_scrubber(self, painter, position_x, height):
         """Draw an enhanced timeline scrubber handle."""
         # Draw the vertical line with gradient
@@ -1171,10 +1227,10 @@ class TimelineWidget(QWidget):
         line_gradient.setColorAt(0.3, QColor(255, 60, 60, 220))
         line_gradient.setColorAt(0.7, QColor(255, 40, 40, 180))
         line_gradient.setColorAt(1, QColor(255, 20, 20, 140))
-        
+
         painter.setPen(QPen(QBrush(line_gradient), 3))
         painter.drawLine(QPointF(position_x, 0), QPointF(position_x, height))
-        
+
         # Draw scrubber handle (enhanced circle at top)
         handle_radius = 8
         handle_rect = QRectF(
@@ -1183,42 +1239,42 @@ class TimelineWidget(QWidget):
             handle_radius * 2,
             handle_radius * 2
         )
-        
+
         # Draw outer glow effect
         outer_glow = QRadialGradient(position_x, 2 + handle_radius, handle_radius * 3)
         outer_glow.setColorAt(0, QColor(255, 100, 100, 100))
         outer_glow.setColorAt(0.5, QColor(255, 60, 60, 50))
         outer_glow.setColorAt(1, QColor(255, 0, 0, 0))
-        
+
         painter.setBrush(QBrush(outer_glow))
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(QRectF(position_x - handle_radius * 2, 2 - handle_radius, 
                                   handle_radius * 4, handle_radius * 4))
-        
+
         # Draw handle background gradient
         handle_gradient = QRadialGradient(position_x, 2 + handle_radius, handle_radius)
         handle_gradient.setColorAt(0, QColor(255, 120, 120))
         handle_gradient.setColorAt(0.7, QColor(255, 60, 60))
         handle_gradient.setColorAt(1, QColor(200, 40, 40))
-        
+
         painter.setBrush(QBrush(handle_gradient))
         painter.setPen(QPen(QColor(255, 255, 255, 200), 2))
         painter.drawEllipse(handle_rect)
-        
+
         # Draw inner highlight
         highlight_rect = QRectF(position_x - 3, 4, 6, 6)
         highlight_gradient = QRadialGradient(position_x, 7, 3)
         highlight_gradient.setColorAt(0, QColor(255, 255, 255, 150))
         highlight_gradient.setColorAt(1, QColor(255, 255, 255, 0))
-        
+
         painter.setBrush(QBrush(highlight_gradient))
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(highlight_rect)
-    
+
     def get_next_label_number(self, category="default"):
         """Get the next sequential number for a label in this category."""
         category_labels = [l for l in self.labels if l.category == category]
-        
+
         # Extract existing numbers from labels
         existing_numbers = []
         for label in category_labels:
@@ -1229,24 +1285,24 @@ class TimelineWidget(QWidget):
                 existing_numbers.append(int(name_parts[-1]))
             elif label.name.isdigit():
                 existing_numbers.append(int(label.name))
-        
+
         # Find the next available number
         if not existing_numbers:
             return 1
         return max(existing_numbers) + 1
-    
+
     def frame_to_position(self, frame):
         """Convert frame number to x position on the timeline (alias for get_position_for_frame)."""
         return self.get_position_for_frame(frame)
-    
+
     def assign_labels_to_tracks(self):
         """Assign labels to tracks to avoid overlapping."""
         # Sort labels by start frame for optimal track assignment
         sorted_labels = sorted(self.labels, key=lambda l: l.start_frame)
-        
+
         # Clear existing tracks
         self.tracks = []
-        
+
         # Assign each label to a track
         for label in sorted_labels:
             # Try to find a suitable track
@@ -1258,35 +1314,35 @@ class TimelineWidget(QWidget):
                     label.track = track_idx  # Store the track index on the label
                     assigned = True
                     break
-            
+
             if not assigned:
                 # Need to create a new track
                 self.tracks.append(label.end_frame)
                 label.track = len(self.tracks) - 1
-    
+
     def set_mode(self, mode):
         """Set the current timeline mode.
-        
+
         Args:
             mode: Either CHOOSE_MODE or EDIT_MODE
         """
         if mode == self.CHOOSE_MODE or mode == self.EDIT_MODE:
             self.current_mode = mode
-            
+
             # Reset state and cursor when changing modes
             self.state = self.NONE
-            
+
             # Set appropriate cursor for the mode
             if mode == self.CHOOSE_MODE:
                 self.setCursor(Qt.ArrowCursor)
             else:  # EDIT_MODE
                 self.setCursor(Qt.CrossCursor)
-            
+
             # Deselect any selected label when changing modes
             if self.selected_label_idx >= 0:
                 self.labels[self.selected_label_idx].selected = False
                 self.selected_label_idx = -1
-            
+
             # Signal that the mode has changed
             # Find parent main window and update its UI
             parent = self.parent()
@@ -1295,15 +1351,25 @@ class TimelineWidget(QWidget):
                     parent.update_mode(mode)
                     break
                 parent = parent.parent()
-            
+
             self.update()  # Redraw the timeline with new mode settings
         else:
             print(f"Invalid mode: {mode}")
-    
+
     def toggle_debug_mode(self):
         """Toggle debug visualization mode."""
         self.debug_mode = not self.debug_mode
         print(f"Debug mode: {'ON' if self.debug_mode else 'OFF'}")
+        self.update()
+
+    @Slot(str, str)
+    def update_label_category(self, label_id, new_category):
+        """Update a label's category (always 'default' now)."""
+        # Category is always "default" now, this method is kept for compatibility
+        for label in self.labels:
+            if label.id == label_id:
+                label.category = "default"
+                break
         self.update()
 
     @Slot(str, str)
@@ -1316,7 +1382,7 @@ class TimelineWidget(QWidget):
                 # Force a repaint of the timeline
                 self.update()
                 break
-    
+
     @Slot(str, object)
     def update_label_color(self, label_id, new_color):
         """Update the color of a label on the timeline."""
@@ -1324,6 +1390,13 @@ class TimelineWidget(QWidget):
         for i, label in enumerate(self.labels):
             if label.id == label_id:
                 self.labels[i].color = new_color
+                category_color = None
+                if self.category_colors:
+                    category_color = self.category_colors.get(label.category)
+                if category_color and QColor(new_color) == QColor(category_color):
+                    self.labels[i].color_is_custom = False
+                else:
+                    self.labels[i].color_is_custom = True
                 # Force a repaint of the timeline
                 self.update()
                 break

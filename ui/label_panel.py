@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 
 import uuid
+import json
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                               QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                              QColorDialog, QComboBox, QTextEdit, QFormLayout,
+                              QColorDialog, QFormLayout, QDialog, QDialogButtonBox,
                               QGroupBox, QSplitter, QFrame, QMenu, QPlainTextEdit,
                               QAbstractItemView, QToolButton, QScrollArea, QSpacerItem,
                               QSizePolicy)
@@ -63,6 +64,42 @@ class ColorButton(QPushButton):
             self.setColor(color)
 
 
+class TemplateEditorDialog(QDialog):
+    """Dialog to edit template metadata."""
+
+    def __init__(self, parent=None, name="", category="", color=None):
+        super().__init__(parent)
+        self.setWindowTitle("编辑模板")
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.name_edit = QLineEdit(name)
+        form.addRow("名称:", self.name_edit)
+
+        # Category is hidden from UI but kept internally
+        self.category_value = category or "default"
+
+        self.color_button = ColorButton(color or QColor(255, 165, 0, 180))
+        self.color_button.setToolTip("选择模板默认颜色")
+        form.addRow("颜色:", self.color_button)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def result_data(self):
+        return {
+            "name": self.name_edit.text().strip(),
+            "category": "default",  # Always use "default"
+            "color": self.color_button.color(),
+        }
+
+
+
 class LabelPanel(QWidget):
     """Panel for managing video labels."""
     
@@ -73,45 +110,56 @@ class LabelPanel(QWidget):
     label_selected = Signal(str)  # Label ID
     label_name_changed = Signal(str, str)  # old_id, new_name
     label_color_changed = Signal(str, object)  # label_id, QColor
+    label_category_changed = Signal(str, str)  # label_id, category key
+    label_playback_requested = Signal(int, int)  # start_frame, end_frame
     
     def __init__(self, parent=None):
         super().__init__(parent)
         
-        # Label categories with Chinese names
-        self.categories = {
-            "default": "默认",
-            "action": "动作",
-            "object": "物体", 
-            "person": "人物",
-            "scene": "场景",
-            "text": "文字"
-        }
-        
-        # Color palette for different categories
-        self.category_colors = {
-            "default": QColor(255, 165, 0, 180),   # Orange
-            "action": QColor(255, 99, 71, 180),    # Tomato
-            "object": QColor(60, 179, 113, 180),   # Medium Sea Green
-            "person": QColor(106, 90, 205, 180),   # Slate Blue
-            "scene": QColor(255, 20, 147, 180),    # Deep Pink
-            "text": QColor(32, 178, 170, 180)      # Light Sea Green
-        }
-        
+        # Template driven metadata (name-category-color)
+        self.templates = []
+        self.template_lookup = {}
+
+        # Default category/key bookkeeping
+        self.default_category_key = "default"
+        self.selected_category_key = self.default_category_key
+        self._category_change_in_progress = False
+
+        # Palette management for template colors
+        self.available_template_colors = [
+            QColor(255, 99, 71, 180),    # Tomato
+            QColor(60, 179, 113, 180),   # Medium Sea Green
+            QColor(106, 90, 205, 180),   # Slate Blue
+            QColor(255, 20, 147, 180),   # Deep Pink
+            QColor(255, 165, 0, 180),    # Orange
+            QColor(32, 178, 170, 180),   # Light Sea Green
+            QColor(123, 104, 238, 180),  # Medium Slate Blue
+            QColor(46, 204, 113, 180),   # Emerald
+            QColor(231, 76, 60, 180),    # Alizarin
+            QColor(241, 196, 15, 180),   # Sun Flower
+        ]
+        self.category_colors = {self.default_category_key: QColor(255, 165, 0, 180)}
+
+        # Track template selection
+        self.selected_template_name = ""
+        self.selected_template = ""
+
         # Initialize label properties
         self.current_label_id = None
         self.label_index = "1"  # Default label index
+        self.user_modified_color = False  # Track if user manually changed color
         
         # Settings for persistent templates (must be before setup_ui)
         from PySide6.QtCore import QSettings
         self.settings = QSettings("LabelV", "VideoLabelTool")
         
-        # Set up UI
-        self.setup_ui()
-        
         # Set up auto-save timer for real-time updates
         self.update_timer = QTimer()
         self.update_timer.setSingleShot(True)
         self.update_timer.timeout.connect(self.on_label_property_changed)
+
+        # Set up UI
+        self.setup_ui()
     
     def setup_ui(self):
         """Set up the user interface."""
@@ -215,8 +263,11 @@ class LabelPanel(QWidget):
             }
         """)
         self.label_list.currentItemChanged.connect(self.on_label_selected)
+        self.label_list.itemClicked.connect(self.on_label_item_clicked)
+        self.label_list.itemDoubleClicked.connect(self.on_label_item_double_clicked)
+        self.label_list.itemActivated.connect(self.on_label_item_double_clicked)
         self.label_list.setMinimumHeight(150)
-        self.label_list.setToolTip("双击标签播放对应片段")
+        self.label_list.setToolTip("点击标签播放对应片段")
         list_layout.addWidget(self.label_list)
         
         layout.addWidget(list_group)
@@ -259,7 +310,9 @@ class LabelPanel(QWidget):
         # Color selector row
         color_layout = QHBoxLayout()
         self.color_button = ColorButton()
+        self.color_button.colorChanged.connect(self.on_color_manually_changed)  # Track user color changes
         self.color_button.colorChanged.connect(self.delayed_update)
+        self.color_button.colorChanged.connect(self.update_current_label_list_icon)  # Immediately update list icon
         color_layout.addWidget(self.color_button)
         
         # Color presets
@@ -286,6 +339,7 @@ class LabelPanel(QWidget):
                 }}
             """)
             preset_btn.setToolTip(f"使用预设颜色")
+            # setColor will trigger colorChanged signal, which updates the list icon
             preset_btn.clicked.connect(lambda checked, c=color: self.color_button.setColor(c))
             color_layout.addWidget(preset_btn)
         
@@ -378,7 +432,7 @@ class LabelPanel(QWidget):
         # Label list widget
         self.label_template_list = QListWidget()
         self.label_template_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.label_template_list.setMaximumHeight(100)
+        # self.label_template_list.setMaximumHeight(100)
         
         # Set font for Chinese support
         template_font = QFont()
@@ -542,82 +596,292 @@ class LabelPanel(QWidget):
         self.set_editor_enabled(False)
     
     def initialize_templates(self):
-        """初始化鼠标行为模板"""
-        # Load templates from settings or use defaults
-        saved_templates = self.load_templates_from_settings()
-        
-        if saved_templates:
-            default_templates = saved_templates
-        else:
-            # Default mouse behavior templates
-            default_templates = [
-                "grooming", "standing", "walking", "running", "rearing",
-                "sniffing", "drinking", "eating", "sleeping", "exploring"
-            ]
-        
-        for template in default_templates:
-            self.label_template_list.addItem(template)
-        
-        # Set default selection
-        self.selected_template = default_templates[0] if default_templates else "grooming"
+        """Initialise templates from settings and populate the list."""
+        self.templates = self.load_templates_from_settings()
+        if not self.templates:
+            self.templates = self._build_default_templates()
+
+        self.template_lookup = {self._normalize_template_key(t["name"]): t for t in self.templates}
+
+        self.label_template_list.clear()
+        for template in self.templates:
+            self._add_template_item(template)
+
         if self.label_template_list.count() > 0:
             self.label_template_list.setCurrentRow(0)
-    
+            self.on_template_selected(self.label_template_list.currentItem())
+        else:
+            self.selected_template_name = ""
+            self.selected_template = ""
+            self.selected_category_key = self.default_category_key
+            self._update_category_display()
+        self._refresh_category_colors()
+
     def load_templates_from_settings(self):
-        """从设置中加载模板"""
-        templates = self.settings.value("label_templates", [])
-        if isinstance(templates, str):
-            templates = [templates]  # Handle single template case
-        return templates if templates else []
-    
-    def save_templates_to_settings(self):
-        """保存模板到设置"""
+        """Load templates with metadata from persistent settings."""
         templates = []
-        for i in range(self.label_template_list.count()):
-            templates.append(self.label_template_list.item(i).text())
-        self.settings.setValue("label_templates", templates)
-    
+        used_colors = set()
+
+        raw = self.settings.value("label_templates_v2")
+        if isinstance(raw, str) and raw.strip():
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                data = []
+            if isinstance(data, list):
+                for entry in data:
+                    template = self._coerce_template(entry, used_colors)
+                    if template:
+                        templates.append(template)
+                        used_colors.add(tuple(template["color"]))
+
+        if not templates:
+            legacy = self.settings.value("label_templates", [])
+            if isinstance(legacy, str):
+                legacy = [legacy]
+            if isinstance(legacy, list):
+                for name in legacy:
+                    template = self._coerce_template({"name": name}, used_colors)
+                    if template:
+                        templates.append(template)
+                        used_colors.add(tuple(template["color"]))
+
+        return templates
+
+    def save_templates_to_settings(self):
+        """Persist current templates into settings (modern + legacy)."""
+        payload = json.dumps(self.templates, ensure_ascii=False)
+        self.settings.setValue("label_templates_v2", payload)
+        self.settings.setValue("label_templates", [t["name"] for t in self.templates])
+
     def auto_add_label_to_templates(self, label_name):
-        """自动将新标签添加到模板"""
-        # Remove number prefix if exists (e.g., "1. grooming" -> "grooming")
-        clean_name = label_name
-        if ". " in label_name:
-            parts = label_name.split(". ", 1)
-            if len(parts) > 1:
-                clean_name = parts[1]
-        
-        # Check if template already exists
-        existing_templates = []
-        for i in range(self.label_template_list.count()):
-            existing_templates.append(self.label_template_list.item(i).text())
-        
-        if clean_name and clean_name not in existing_templates:
-            self.label_template_list.addItem(clean_name)
-            self.save_templates_to_settings()
+        """Ensure we remember templates that appear via label editing."""
+        clean_name = self._strip_label_index(label_name)
+        if not clean_name:
+            return
+
+        key = self._normalize_template_key(clean_name)
+        if key in self.template_lookup:
+            return
+
+        used_colors = {tuple(t["color"]) for t in self.templates}
+        template_data = {"name": clean_name, "color": self._qcolor_to_list(self.color_button.color())}
+        category_hint = self.selected_category_key
+        template_data["category"] = category_hint or self.default_category_key
+        template = self._coerce_template(template_data, used_colors)
+        if not template:
+            return
+
+        self.templates.append(template)
+        self.template_lookup[key] = template
+        item = self._add_template_item(template)
+        self.save_templates_to_settings()
+        self._refresh_category_colors()
+        if item:
+            self.label_template_list.setCurrentItem(item)
+
+    @Slot()
+    def on_color_manually_changed(self):
+        """Called when user manually changes color via color button."""
+        if not self._category_change_in_progress and self.current_label_id:
+            self.user_modified_color = True
     
     def delayed_update(self):
-        """延迟更新以避免频繁的信号发射"""
-        self.update_timer.start(300)  # 300ms delay
+        """延迟更新计时器"""
+        self.update_timer.start(100)  # 100ms delay for more responsive updates
     
-
-    
-    def duplicate_current_label(self):
-        """复制当前标签"""
+    def update_current_label_list_icon(self):
+        """Immediately update the color icon of the current label in the list."""
         if not self.current_label_id:
             return
         
-        # Save current label data as template
-        template_name = f"{self.name_edit.text()}_副本"
-        if template_name not in [self.label_template_list.item(i).text() 
-                                for i in range(self.label_template_list.count())]:
-            self.label_template_list.addItem(template_name)
+        color = self.color_button.color()
         
-        # Select the new template
-        for i in range(self.label_template_list.count()):
-            if self.label_template_list.item(i).text() == template_name:
-                self.label_template_list.setCurrentRow(i)
+        # Find and update the list item icon
+        for i in range(self.label_list.count()):
+            item = self.label_list.item(i)
+            if item.data(Qt.UserRole) == self.current_label_id:
+                pixmap = QPixmap(16, 16)
+                pixmap.fill(Qt.transparent)
+                painter = QPainter(pixmap)
+                painter.setBrush(QBrush(color))
+                painter.setPen(Qt.black)
+                painter.drawRect(0, 0, 15, 15)
+                painter.end()
+                item.setIcon(QIcon(pixmap))
                 break
-    
+
+    def _build_default_templates(self):
+        """Construct default templates with distinct colours."""
+        default_names = [
+            "grooming", "standing", "walking", "running", "rearing",
+            "sniffing", "drinking", "eating", "sleeping", "exploring"
+        ]
+        templates = []
+        used = set()
+        for name in default_names:
+            template = self._coerce_template({"name": name}, used)
+            if template:
+                templates.append(template)
+                used.add(tuple(template["color"]))
+        return templates
+
+    @staticmethod
+    def _normalize_template_key(name):
+        return name.strip().lower() if isinstance(name, str) else ""
+
+    @staticmethod
+    def _strip_label_index(label_name):
+        if not isinstance(label_name, str):
+            return ""
+        name = label_name.strip()
+        if not name:
+            return ""
+        if ". " in name:
+            parts = name.split(". ", 1)
+            if parts[0].isdigit():
+                return parts[1].strip()
+        return name
+
+    def _coerce_template(self, data, used_colors):
+        if isinstance(data, str):
+            meta = {"name": data}
+        elif isinstance(data, dict):
+            meta = data
+        else:
+            return None
+
+        name = str(meta.get("name", "")).strip()
+        if not name:
+            return None
+
+        category = str(meta.get("category", name)).strip() or name
+        raw_color = meta.get("color")
+        desired = None
+        if isinstance(raw_color, (list, tuple)) and len(raw_color) >= 3:
+            rgba = [int(x) for x in raw_color[:4]]
+            if len(rgba) == 3:
+                rgba.append(180)
+            desired = tuple(max(0, min(255, x)) for x in rgba)
+
+        color_list = self._allocate_template_color(desired, used_colors)
+
+        return {
+            "name": name,
+            "category": category,
+            "color": color_list,
+        }
+
+    def _allocate_template_color(self, desired_rgba, used_colors):
+        if desired_rgba and desired_rgba not in used_colors:
+            return list(desired_rgba)
+
+        for color in self.available_template_colors:
+            rgba = (color.red(), color.green(), color.blue(), color.alpha())
+            if rgba not in used_colors:
+                return [*rgba]
+
+        base = self.category_colors.get(self.default_category_key, QColor(255, 165, 0, 180))
+        rgba = (base.red(), base.green(), base.blue(), base.alpha())
+        if desired_rgba and desired_rgba not in used_colors:
+            return list(desired_rgba)
+
+        for offset in range(1, 16):
+            candidate = (
+                (rgba[0] + 23 * offset) % 256,
+                (rgba[1] + 47 * offset) % 256,
+                (rgba[2] + 61 * offset) % 256,
+                rgba[3],
+            )
+            if candidate not in used_colors:
+                return list(candidate)
+        return [*rgba]
+
+    def _add_template_item(self, template):
+        item = QListWidgetItem(template["name"])
+        item.setData(Qt.UserRole, template)
+        item.setToolTip(f"类别: {template['category']}")
+        item.setIcon(self._create_color_icon(self._list_to_qcolor(template["color"])))
+        self.label_template_list.addItem(item)
+        return item
+
+    def _refresh_template_item(self, item):
+        template = item.data(Qt.UserRole)
+        if not template:
+            return
+        item.setText(template["name"])
+        item.setToolTip(f"类别: {template['category']}")
+        item.setIcon(self._create_color_icon(self._list_to_qcolor(template["color"])))
+
+    @staticmethod
+    def _create_color_icon(color):
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setBrush(QBrush(color))
+        painter.setPen(Qt.black)
+        painter.drawRect(0, 0, 15, 15)
+        painter.end()
+        return QIcon(pixmap)
+
+    @staticmethod
+    def _qcolor_to_list(color):
+        return [color.red(), color.green(), color.blue(), color.alpha()]
+
+    @staticmethod
+    def _list_to_qcolor(rgba):
+        if not rgba:
+            return QColor(255, 165, 0, 180)
+        values = list(rgba)
+        if len(values) < 4:
+            values.extend([180] * (4 - len(values)))
+        return QColor(values[0], values[1], values[2], values[3])
+
+    def _refresh_category_colors(self):
+        base = self.category_colors.get(self.default_category_key, QColor(255, 165, 0, 180))
+        colors = {self.default_category_key: base}
+        for template in self.templates:
+            colors[template["category"]] = self._list_to_qcolor(template["color"])
+        self.category_colors = colors
+        timeline = self._get_timeline()
+        if timeline:
+            timeline.set_category_colors(self.category_colors)
+
+    def _update_category_display(self):
+        """Category display has been removed from UI. This is a no-op."""
+        pass
+
+    def duplicate_current_label(self):
+        """Duplicate current label metadata into templates."""
+        if not self.current_label_id:
+            return
+
+        base_name = self.name_edit.text().strip()
+        if not base_name:
+            return
+
+        template_name = f"{base_name}_副本"
+        key = self._normalize_template_key(template_name)
+        if key in self.template_lookup:
+            return
+
+        category_hint = self.selected_category_key
+        color = self._qcolor_to_list(self.color_button.color())
+        used_colors = {tuple(t["color"]) for t in self.templates}
+        template_data = {"name": template_name, "color": color}
+        template_data["category"] = category_hint or self.default_category_key
+        template = self._coerce_template(template_data, used_colors)
+        if not template:
+            return
+
+        self.templates.append(template)
+        self.template_lookup[key] = template
+        item = self._add_template_item(template)
+        self.save_templates_to_settings()
+        self._refresh_category_colors()
+        if item:
+            self.label_template_list.setCurrentItem(item)
+
     def update_label_count(self):
         """更新标签数量显示"""
         count = self.label_list.count()
@@ -652,28 +916,31 @@ class LabelPanel(QWidget):
         # Get the next number based on existing labels
         count = self.label_list.count() + 1
         
+        default_color = self.category_colors.get(self.selected_category_key, QColor(255, 165, 0, 180))
         label_data = {
             "id": label_id,
             "name": f"Label {count}",
             "start_frame": 0,
             "end_frame": 0,
-            "color": [255, 165, 0, 180],  # Orange with transparency
-            "category": "default",  # Keep for compatibility
+            "color": [default_color.red(), default_color.green(), default_color.blue(), default_color.alpha()],
+            "category": self.selected_category_key,
+            "color_is_custom": False,
             "description": ""
         }
         
-        # Emit signal to add label
+        # If a template is selected, apply it BEFORE adding to timeline
+        if self.selected_template_name:
+            tpl = self.template_lookup.get(self._normalize_template_key(self.selected_template_name))
+            if tpl:
+                label_data["name"] = tpl["name"]
+                label_data["category"] = tpl.get("category", self.default_category_key)
+                label_data["color"] = tpl.get("color", label_data["color"])
+                label_data["color_is_custom"] = False
+                self.selected_category_key = label_data["category"]
+        
+        # Emit signal to add label (timeline will pick initial color correctly)
+        # The timeline will emit label_created signal, which will trigger add_label_to_list via MainWindow
         self.label_added.emit(label_data)
-        
-        # Add to list
-        self.add_label_to_list(label_data)
-        
-        # Select the new item
-        for i in range(self.label_list.count()):
-            item = self.label_list.item(i)
-            if item.data(Qt.UserRole) == label_id:
-                self.label_list.setCurrentItem(item)
-                break
         self.update_label_count()
     
     @Slot()
@@ -700,62 +967,98 @@ class LabelPanel(QWidget):
                 self.label_list.setCurrentRow(new_row)
             self.update_label_count()
     
+    @Slot(str)
+    def on_timeline_label_removed(self, label_id):
+        """Synchronize list when a label is removed from the timeline."""
+        if not label_id:
+            return
+        removed_row = None
+        for i in range(self.label_list.count()):
+            item = self.label_list.item(i)
+            if item.data(Qt.UserRole) == label_id:
+                self.label_list.takeItem(i)
+                removed_row = i
+                break
+        if removed_row is None:
+            return
+        was_current = (self.current_label_id == label_id)
+        if was_current:
+            self.clear_editor()
+        if self.label_list.count() > 0:
+            next_row = min(removed_row, self.label_list.count() - 1)
+            self.label_list.setCurrentRow(next_row)
+        self.update_label_count()
+    
     @Slot()
     def on_label_property_changed(self):
         """Handle changes to label properties."""
         if not self.current_label_id:
             return
-            
-        # Get the action name from the text field
+
         action_name = self.name_edit.text().strip()
-        
-        # Format the full name with index prefix
         full_name = f"{self.label_index}. {action_name}" if action_name else f"{self.label_index}."
+
+        # Always use "default" category
+        category = self.default_category_key
+        color = self.color_button.color()
         
-        # Create updated label data
+        # Check if name matches a template
+        template = None
+        if action_name:
+            template = self.template_lookup.get(self._normalize_template_key(action_name))
+
+        # Determine color_is_custom status
+        # Only apply template color if: 1) template exists, 2) user hasn't manually changed color
+        if template and not self.user_modified_color:
+            # Apply template color only if user hasn't customized it
+            target_color = self._list_to_qcolor(template.get("color"))
+            if self.color_button.color() != target_color:
+                self._category_change_in_progress = True
+                try:
+                    self.color_button.blockSignals(True)
+                    self.color_button.setColor(target_color)
+                    color = target_color
+                finally:
+                    self.color_button.blockSignals(False)
+                    self._category_change_in_progress = False
+            color_is_custom = False
+        else:
+            # User has modified color, or no template match
+            color_is_custom = self.user_modified_color
+
         label_data = {
             "id": self.current_label_id,
             "name": full_name,
-            "color": [
-                self.color_button.color().red(),
-                self.color_button.color().green(),
-                self.color_button.color().blue(),
-                self.color_button.color().alpha()
-            ],
+            "color": [color.red(), color.green(), color.blue(), color.alpha()],
+            "category": category,
+            "color_is_custom": color_is_custom,
             "description": self.description_edit.toPlainText()
         }
-        
-        # Update list item text
+
+        # Update list item display
         for i in range(self.label_list.count()):
             item = self.label_list.item(i)
             if item.data(Qt.UserRole) == self.current_label_id:
                 item.setText(full_name)
-                
-                # Set color of item
                 pixmap = QPixmap(16, 16)
                 pixmap.fill(Qt.transparent)
-                
                 painter = QPainter(pixmap)
-                painter.setBrush(QBrush(self.color_button.color()))
+                painter.setBrush(QBrush(color))
                 painter.setPen(Qt.black)
                 painter.drawRect(0, 0, 15, 15)
                 painter.end()
-                
                 item.setIcon(QIcon(pixmap))
+                item.setData(Qt.UserRole + 1, category)
                 break
-        
-        # Emit signal to update label
+
         self.label_updated.emit(label_data)
-        
-        # Emit color change signal
-        self.label_color_changed.emit(self.current_label_id, self.color_button.color())
-        
-        # Auto-add new label to templates
-        self.auto_add_label_to_templates(full_name)
-        
-        # Add this line after updating the label in your data structure
+        if not self._category_change_in_progress:
+            self.label_color_changed.emit(self.current_label_id, color)
+
+        # Removed auto-save to templates - only save when user manually clicks "Add" button
+        # self.auto_add_label_to_templates(full_name)
         self.label_name_changed.emit(self.current_label_id, full_name)
-    
+
     @Slot(QListWidgetItem, QListWidgetItem)
     def on_label_selected(self, current, previous):
         """Handle selection of a label from the list."""
@@ -791,12 +1094,42 @@ class LabelPanel(QWidget):
                 break
             parent = parent.parent()
     
+    @Slot(QListWidgetItem)
+    def on_label_item_clicked(self, item):
+        """Play the corresponding segment when a label is clicked."""
+        if not item:
+            return
+        label_id = item.data(Qt.UserRole)
+        timeline = self._get_timeline()
+        if timeline is None:
+            return
+        for label in getattr(timeline, 'labels', []):
+            if label.id == label_id:
+                self.label_playback_requested.emit(label.start_frame, label.end_frame)
+                break
+
+    @Slot(QListWidgetItem)
+    def on_label_item_double_clicked(self, item):
+        """Play the corresponding segment when a label is activated."""
+        self.on_label_item_clicked(item)
+
     def add_label_to_list(self, label_data):
         """Add a label to the list widget."""
         # Update the name format when adding new labels
         if label_data["name"].startswith("Label ") or label_data["name"] == "New Label":
-            # Apply template naming
-            label_data["name"] = self.selected_template
+            if self.selected_template_name:
+                template = self.template_lookup.get(self._normalize_template_key(self.selected_template_name))
+                if template:
+                    label_data["name"] = template["name"]
+                    label_data["category"] = template.get("category", self.default_category_key)
+                    # Only apply template color if no custom color is set
+                    if not label_data.get("color_is_custom", False):
+                        label_data["color"] = template.get("color", label_data.get("color"))
+                    label_data["color_is_custom"] = label_data.get("color_is_custom", False)
+                    self.selected_category_key = template.get("category", self.default_category_key)
+                else:
+                    label_data["name"] = self.selected_template_name
+                    label_data["category"] = self.selected_category_key or self.default_category_key
         
         # Check if label already exists in the list
         label_id = label_data.get("id", "")
@@ -812,6 +1145,7 @@ class LabelPanel(QWidget):
         
         item = QListWidgetItem(name)
         item.setData(Qt.UserRole, label_id)
+        item.setData(Qt.UserRole + 1, label_data.get("category", "default"))
         
         # Set icon with label color
         pixmap = QPixmap(16, 16)
@@ -843,6 +1177,7 @@ class LabelPanel(QWidget):
         color = label_data.get("color", [255, 165, 0, 180])
         
         item.setText(name)
+        item.setData(Qt.UserRole + 1, label_data.get("category", "default"))
         
         # Update icon with new color
         pixmap = QPixmap(16, 16)
@@ -859,7 +1194,12 @@ class LabelPanel(QWidget):
     def update_label_data(self, label_data):
         """Update the editor with label data."""
         self.current_label_id = label_data["id"]
+        # Category is always "default" internally
+        self.selected_category_key = self.default_category_key
         
+        # Reset user_modified_color flag based on label's color_is_custom status
+        self.user_modified_color = label_data.get("color_is_custom", False)
+
         # Parse label name - maintain the index format "1. Action"
         name = label_data.get("name", "")
         # Split at the first period to separate the index from the action
@@ -889,7 +1229,12 @@ class LabelPanel(QWidget):
                     self.label_index = "1"
         
         color_rgba = label_data.get("color", [255, 165, 0, 180])
+        self.color_button.blockSignals(True)
         self.color_button.setColor(QColor(*color_rgba))
+        self.color_button.blockSignals(False)
+        
+        # Update the list item icon with the loaded color
+        self.update_current_label_list_icon()
         
         self.description_edit.setPlainText(label_data.get("description", ""))
         
@@ -924,6 +1269,19 @@ class LabelPanel(QWidget):
         self.remove_button.setEnabled(True)
         self.duplicate_button.setEnabled(True)
     
+    def current_category(self):
+        """Return the currently selected category key."""
+        return self.selected_category_key or self.default_category_key
+
+    def _get_timeline(self):
+        """Locate the timeline widget from the parent hierarchy."""
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'timeline'):
+                return parent.timeline
+            parent = parent.parent()
+        return None
+
     def update_frame_range(self, label_id, start_frame, end_frame):
         """Update the displayed frame range for a label."""
         if label_id == self.current_label_id:
@@ -942,139 +1300,179 @@ class LabelPanel(QWidget):
         self.current_label_id = None
         self.name_edit.clear()
         self.description_edit.clear()
-        self.color_button.setColor(QColor(255, 165, 0, 180))  # Reset to default color
+        self.selected_category_key = self.default_category_key
+        self.user_modified_color = False  # Reset color modification flag
+        default_color = self.category_colors.get(self.default_category_key, QColor(255, 165, 0, 180))
+        self.color_button.blockSignals(True)
+        self.color_button.setColor(default_color)  # Reset to default color
+        self.color_button.blockSignals(False)
         self.start_frame_label.setText("0 (00:00:00)")
         self.end_frame_label.setText("0 (00:00:00)")
         self.set_editor_enabled(False) 
 
     def on_template_selected(self, item):
         """Handle template selection."""
-        self.selected_template = item.text()
-        
-        # Automatically update the name field when a template is selected
-        if self.current_label_id is None:  # Only when creating new labels
-            self.name_edit.setText(self.selected_template)
-    
+        if not item:
+            return
+        template = item.data(Qt.UserRole) or {}
+        name = template.get("name", item.text())
+        color = self._list_to_qcolor(template.get("color"))
+
+        self.selected_template_name = name
+        self.selected_template = name
+        # Category is always "default"
+        self.selected_category_key = self.default_category_key
+
+        self._category_change_in_progress = True
+        try:
+            self.color_button.blockSignals(True)
+            self.color_button.setColor(color)
+        finally:
+            self.color_button.blockSignals(False)
+            self._category_change_in_progress = False
+
+        if self.current_label_id is None:
+            self.name_edit.setText(name)
+
     def on_template_selection_changed(self):
         """Handle template selection change to enable/disable buttons."""
         has_selection = len(self.label_template_list.selectedItems()) > 0
         self.delete_template_button.setEnabled(has_selection)
         self.clear_template_button.setEnabled(has_selection)
-    
+        current_item = self.label_template_list.currentItem()
+        if current_item:
+            self.on_template_selected(current_item)
+        else:
+            self.selected_template_name = ""
+            self.selected_template = ""
+            self.selected_category_key = self.default_category_key
+
     def delete_selected_template(self):
         """Delete the selected template."""
         current_item = self.label_template_list.currentItem()
-        if current_item:
-            template_name = current_item.text()
-            
-            # Confirm deletion
-            from PySide6.QtWidgets import QMessageBox
-            reply = QMessageBox.question(
-                self, "删除模板",
-                f"确定要删除模板 '{template_name}' 吗？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-            
-            if reply == QMessageBox.Yes:
-                # Remove from list
-                row = self.label_template_list.row(current_item)
-                self.label_template_list.takeItem(row)
-                
-                # Save to settings
-                self.save_templates_to_settings()
-                
-                # Update button states
-                self.on_template_selection_changed()
-    
+        if not current_item:
+            return
+
+        template = current_item.data(Qt.UserRole) or {}
+        template_name = template.get("name", current_item.text())
+
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, "提示",
+            f"确定要删除模板 '{template_name}' 吗?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        row = self.label_template_list.row(current_item)
+        self.label_template_list.takeItem(row)
+
+        key = self._normalize_template_key(template_name)
+        if template in self.templates:
+            self.templates.remove(template)
+        else:
+            self.templates = [t for t in self.templates if self._normalize_template_key(t.get("name", "")) != key]
+        self.template_lookup.pop(key, None)
+
+        if self.selected_template_name == template_name:
+            self.selected_template_name = ""
+            self.selected_template = ""
+            self.selected_category_key = self.default_category_key
+
+        self.save_templates_to_settings()
+        self._refresh_category_colors()
+        self.on_template_selection_changed()
     def edit_selected_template(self):
         """Edit the selected template name."""
         current_item = self.label_template_list.currentItem()
-        if current_item:
-            # Get new name from user
-            from PySide6.QtWidgets import QInputDialog
-            old_name = current_item.text()
-            new_name, ok = QInputDialog.getText(
-                self, "编辑模板", 
-                "请输入新的模板名称:", 
-                text=old_name
-            )
-            
-            if ok and new_name.strip():
-                new_name = new_name.strip()
-                
-                # Check if name already exists
-                existing_names = []
-                for i in range(self.label_template_list.count()):
-                    if i != self.label_template_list.row(current_item):
-                        existing_names.append(self.label_template_list.item(i).text())
-                
-                if new_name in existing_names:
-                    from PySide6.QtWidgets import QMessageBox
-                    QMessageBox.warning(self, "重复名称", "该模板名称已存在！")
-                    return
-                
-                # Update the item
-                current_item.setText(new_name)
-                
-                # Save to settings
-                self.save_templates_to_settings()
-                
-                # Update selected template if this was the selected one
-                if self.selected_template == old_name:
-                    self.selected_template = new_name
+        if not current_item:
+            return
+
+        template = current_item.data(Qt.UserRole) or {}
+        from PySide6.QtWidgets import QMessageBox
+
+        dialog = TemplateEditorDialog(
+            self,
+            template.get("name", current_item.text()),
+            template.get("category", self.default_category_key),
+            self._list_to_qcolor(template.get("color"))
+        )
+
+        if dialog.exec() != dialog.Accepted:
+            return
+
+        data = dialog.result_data()
+        new_name = data.get("name", "").strip()
+        if not new_name:
+            QMessageBox.warning(self, "提示", "模板名称不能为空")
+            return
+
+        old_name = template.get("name", "")
+        normalized_old = self._normalize_template_key(old_name)
+        normalized_new = self._normalize_template_key(new_name)
+        if normalized_new != normalized_old and normalized_new in self.template_lookup:
+            QMessageBox.warning(self, "提示", "模板名称已存在")
+            return
+
+        if normalized_new != normalized_old:
+            self.template_lookup.pop(normalized_old, None)
+
+        template["name"] = new_name
+        template["category"] = "default"  # Always use "default"
+        template["color"] = self._qcolor_to_list(data.get("color"))
+        self.template_lookup[normalized_new] = template
+
+        if template not in self.templates:
+            replaced = False
+            for idx, existing in enumerate(self.templates):
+                if self._normalize_template_key(existing.get("name", "")) == normalized_old:
+                    self.templates[idx] = template
+                    replaced = True
+                    break
+            if not replaced:
+                self.templates.append(template)
+
+        self._refresh_template_item(current_item)
+        current_item.setData(Qt.UserRole, template)
+        self.save_templates_to_settings()
+        self._refresh_category_colors()
+
+        if self.selected_template_name == old_name:
+            self.selected_template_name = new_name
+            self.selected_template = new_name
+            self.selected_category_key = self.default_category_key
+            self.on_template_selected(current_item)
+
+
 
     def add_current_to_templates(self):
         """Add the current label name to templates."""
         current_name = self.name_edit.text().strip()
         if not current_name:
             return
-        
-        # Check if already exists
-        items = [self.label_template_list.item(i).text() 
-                 for i in range(self.label_template_list.count())]
-        
-        if current_name not in items:
-            self.label_template_list.addItem(current_name)
-            self.save_templates_to_settings()
-        
 
-        
-    def create_new_label(self):
-        """Create a new label."""
-        # Modify your existing method to use the selected template
-        # if no name is provided
-        
-        # Assuming you have a name_edit field for the label name
-        name = self.name_edit.text().strip()
-        if not name:
-            name = self.selected_template
-            self.name_edit.setText(name)
-        
-        # Rest of your existing label creation code
-        # ... 
-
-    def apply_changes(self):
-        """Apply changes to the current label."""
-        if self.current_label_id is None:
+        key = self._normalize_template_key(current_name)
+        if key in self.template_lookup:
             return
-        
-        # Get current values
-        name = self.name_edit.text()
-        description = self.description_edit.toPlainText()
-        color = self.color_button.color()
-        
-        # Extract category from name (e.g., "3. return" -> "return")
-        category = "default"
-        if '.' in name:
-            parts = name.split('.')
-            if len(parts) > 1:
-                category = parts[1].strip()
-        
-        # Update the label in the timeline
-        self.label_updated.emit(self.current_label_id, {
-            'name': name,
-            'description': description,
-            'color': color,
-            'category': category
-        }) 
+
+        category_hint = self.selected_category_key
+        color = self._qcolor_to_list(self.color_button.color())
+        used_colors = {tuple(t["color"]) for t in self.templates}
+        template_data = {"name": current_name, "color": color}
+        template_data["category"] = category_hint or self.default_category_key
+        template = self._coerce_template(template_data, used_colors)
+        if not template:
+            return
+
+        self.templates.append(template)
+        self.template_lookup[key] = template
+        item = self._add_template_item(template)
+        self.save_templates_to_settings()
+        self._refresh_category_colors()
+        if item:
+            self.label_template_list.setCurrentItem(item)
+
+

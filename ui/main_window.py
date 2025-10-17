@@ -45,6 +45,12 @@ class MainWindow(QMainWindow):
         
         self.settings = QSettings("LabelV", "VideoLabelTool")
         
+        # Current project data - 初始化在其他组件之前
+        self.current_video_path = None
+        self.current_project_path = None
+        self.labels = []
+        self.has_unsaved_changes = False
+        
         # 撤销/重做系统
         self.undo_stack = []
         self.redo_stack = []
@@ -59,6 +65,7 @@ class MainWindow(QMainWindow):
         self.video_player = VideoPlayer()
         self.timeline = TimelineWidget()
         self.label_panel = LabelPanel()
+        self.timeline.set_category_colors(self.label_panel.category_colors)
         
         # Set up central widget with splitter for better layout
         self.setup_main_layout()
@@ -70,12 +77,6 @@ class MainWindow(QMainWindow):
         self.create_actions()
         self.create_toolbar()
         self.create_status_bar()
-        
-        # Current project data
-        self.current_video_path = None
-        self.current_project_path = None
-        self.labels = []
-        self.has_unsaved_changes = False
         
         # Override the timeline's keyPressEvent with our custom handler
         self.timeline.keyPressEvent = lambda event: self.handle_timeline_key_press(event)
@@ -149,15 +150,19 @@ class MainWindow(QMainWindow):
         
         # Connect label playback request to player
         self.timeline.label_playback_requested.connect(self.play_label_segment)
+        self.label_panel.label_playback_requested.connect(self.play_label_segment)
         
         # Connect signals for timeline-label panel synchronization
         self.timeline.label_created.connect(self.on_label_created)
+        self.timeline.label_removed.connect(self.label_panel.on_timeline_label_removed)
         
         # Connect label name change signal to timeline
         self.label_panel.label_name_changed.connect(self.timeline.update_label_name)
         
         # Connect label color change signal to timeline
         self.label_panel.label_color_changed.connect(self.timeline.update_label_color)
+        # Category is always "default" now, so no need to handle category changes
+        # self.label_panel.label_category_changed.connect(self.timeline.update_label_category)
         
         # Add this connection
         self.label_panel.label_template_list.itemClicked.connect(
@@ -251,7 +256,7 @@ class MainWindow(QMainWindow):
         self.help_action.setShortcut(QKeySequence.HelpContents)
         self.help_action.setStatusTip("显示快捷键帮助")
         self.help_action.triggered.connect(self.show_help)
-    
+
     def create_toolbar(self):
         """Create application toolbar."""
         toolbar = QToolBar("主工具栏")
@@ -642,6 +647,8 @@ class MainWindow(QMainWindow):
                 
                 # Explicitly set the frame count
                 self.timeline.set_frame_count(self.video_player.frame_count)
+                # Sync FPS so time ruler matches player timing
+                self.timeline.set_fps(self.video_player.fps)
                 
                 # Ensure timeline gets updated
                 self.timeline.update()
@@ -905,6 +912,7 @@ class MainWindow(QMainWindow):
         
         self.mark_saved()
 
+    # add csv loading
     def load_labels(self):
         """Load labels from JSON file with same name as video."""
         if not self.current_video_path:
@@ -945,32 +953,71 @@ class MainWindow(QMainWindow):
             self.timeline.set_frame_count(self.video_player.frame_count)  # Restore frame count
             self.label_panel.clear_editor()
             
+            # Prepare template and color helpers
+            template_lookup = getattr(self.label_panel, "template_lookup", {}) or {}
+            used_colors = {tuple(t["color"]) for t in getattr(self.label_panel, "templates", [])}
+            dynamic_color_map = {}  # name (stripped) -> rgba list for new names not in templates
+            
             # Process and add each label
             labels_loaded = 0
             for label_data in data.get("labels", []):
-                # Get order and category
-                order = label_data.get("order", 0)
-                category = label_data.get("category", "default")
+                # Determine display name (support both new and legacy formats)
+                if isinstance(label_data.get("name"), str) and label_data.get("name").strip():
+                    formatted_name = label_data["name"].strip()
+                else:
+                    order = label_data.get("order", 0)
+                    category_name = label_data.get("category", "default")
+                    formatted_name = f"{order}. {category_name}" if order > 0 else category_name
                 
-                # Format name as "order. category"
-                formatted_name = f"{order}. {category}" if order > 0 else category
+                base_name = self.label_panel._strip_label_index(formatted_name)
+                norm_key = self.label_panel._normalize_template_key(base_name)
                 
-                # Create internal label with proper fields and default color
+                # Normalize color to RGBA list of 4 ints or None
+                def ensure_rgba4(c):
+                    if isinstance(c, list) and len(c) >= 3:
+                        v = [int(x) for x in c[:4]]
+                        if len(v) == 3:
+                            v.append(180)
+                        return [max(0, min(255, x)) for x in v]
+                    return None
+                
+                color_rgba = ensure_rgba4(label_data.get("color"))
+                
+                if color_rgba is None:
+                    # No color in JSON → try template first, then allocate a new distinct color
+                    tpl = template_lookup.get(norm_key)
+                    if tpl:
+                        color_rgba = ensure_rgba4(tpl.get("color")) or [255, 165, 0, 180]
+                        color_is_custom = False
+                    else:
+                        # New name not in template: allocate distinct color, reuse if seen before
+                        if base_name in dynamic_color_map:
+                            color_rgba = dynamic_color_map[base_name]
+                        else:
+                            color_rgba = self.label_panel._allocate_template_color(None, used_colors)
+                            dynamic_color_map[base_name] = color_rgba
+                            used_colors.add(tuple(color_rgba))
+                        color_is_custom = True
+                else:
+                    # Color present in JSON; treat as custom to preserve it
+                    color_is_custom = True
+                
+                # Create internal label with proper fields
                 internal_label = {
                     "id": label_data.get("id", str(uuid.uuid4())),
                     "text": formatted_name,
                     "name": formatted_name,
                     "start_frame": label_data.get("start_frame", 0),
                     "end_frame": label_data.get("end_frame", 0),
-                    "category": category,
+                    "category": "default",  # keep internal category stable
                     "description": label_data.get("description", ""),
-                    # No color specified - will use default or category-based
+                    "color": color_rgba,
+                    "color_is_custom": bool(color_is_custom),
                 }
                 
-                # Add to timeline
+                # Add to timeline and panel
                 success = self.timeline.add_label(internal_label)
                 if success:
-                    # Also add to label panel list
                     self.label_panel.add_label_to_list(internal_label)
                     labels_loaded += 1
             
@@ -985,3 +1032,8 @@ class MainWindow(QMainWindow):
             import traceback
             error_details = traceback.format_exc()
             QMessageBox.critical(self, "错误", f"加载标签失败: {str(e)}\n\n详细信息: {error_details}") 
+
+
+    # def load_csv(self, ):
+
+    #     return 
